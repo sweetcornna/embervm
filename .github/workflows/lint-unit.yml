@@ -38,6 +38,38 @@ jobs:
           sudo apt-get install -y e2fsprogs
           EMBERVM_NET_TESTS=1 go test ./pkg/template/ -run 'TestBuildFromRegistry|TestBuildFromTar|TestMkext4' -v
 
+  controlplane-pg:
+    # Control-plane store + REST handlers against a real PostgreSQL.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: embervm
+          POSTGRES_PASSWORD: embervm
+          POSTGRES_DB: embervm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Control-plane tests against PostgreSQL
+        env:
+          EMBERVM_PG_TESTS: "1"
+          EMBERVM_TEST_DATABASE_URL: postgres://embervm:embervm@localhost:5432/embervm?sslmode=disable
+        run: go test ./pkg/controlplane/ -v -count=1
+
   storage-zfs:
     # Real-ZFS clone/snapshot check on a throwaway loop-file pool. The zfs
     # kernel module ships in the ubuntu-latest kernel but zfsutils-linux does

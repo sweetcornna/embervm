@@ -1,0 +1,165 @@
+package controlplane
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/embervm/embervm/pkg/guestapi"
+	"github.com/embervm/embervm/pkg/nodeapi"
+)
+
+// cpMockAgent is a nodeapi.Agent that records calls for the handler tests.
+type cpMockAgent struct {
+	buildErr  error
+	createErr error
+}
+
+func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
+func (m *cpMockAgent) CreateSandbox(_ context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
+	if m.createErr != nil {
+		return nodeapi.SandboxStatus{}, m.createErr
+	}
+	return nodeapi.SandboxStatus{SandboxID: req.SandboxID, State: "RUNNING", Netns: "ember0", GuestAddr: "172.16.0.2:7777"}, nil
+}
+func (m *cpMockAgent) StopSandbox(context.Context, string) error { return nil }
+func (m *cpMockAgent) PauseSandbox(context.Context, string) error {
+	return nil
+}
+func (m *cpMockAgent) ResumeSandbox(_ context.Context, id string) (nodeapi.SandboxStatus, error) {
+	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING", Netns: "ember0"}, nil
+}
+func (m *cpMockAgent) SnapshotSandbox(_ context.Context, id, tag string) (string, error) {
+	return "snap-" + tag, nil
+}
+func (m *cpMockAgent) Status(_ context.Context, id string) (nodeapi.SandboxStatus, error) {
+	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING"}, nil
+}
+func (m *cpMockAgent) Exec(_ context.Context, id string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {
+	return &guestapi.ExecResponse{ExitCode: 0, Stdout: []byte("out:" + req.Cmd)}, nil
+}
+func (m *cpMockAgent) Health(_ context.Context, id string) (*guestapi.HealthResponse, error) {
+	return &guestapi.HealthResponse{OK: true, Seq: 1}, nil
+}
+func (m *cpMockAgent) ReadFile(_ context.Context, id, path string) ([]byte, error) {
+	return []byte("data:" + path), nil
+}
+func (m *cpMockAgent) WriteFile(context.Context, string, string, fs.FileMode, []byte) error {
+	return nil
+}
+
+func newTestServer(t *testing.T, agent nodeapi.Agent) http.Handler {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	store := testStore(t) // skips without PG
+	tokens := NewTokenStore(map[string]TokenInfo{"tok": {Owner: "alice", MaxSandboxes: 2}})
+	return NewServer(store, agent, tokens).Handler()
+}
+
+// call issues an authenticated request and returns the recorder.
+func call(h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
+	var rdr *bytes.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		rdr = bytes.NewReader(raw)
+	} else {
+		rdr = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestServerFullLifecycle(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+
+	// Create template.
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "alpine:3.20"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create template = %d: %s", w.Code, w.Body)
+	}
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	if tpl.State != "READY" {
+		t.Errorf("template state = %q, want READY", tpl.State)
+	}
+
+	// Create sandbox.
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID, "vcpus": 1, "memory_mib": 256, "data_disk_gib": 15})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create sandbox = %d: %s", w.Code, w.Body)
+	}
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	if sb.State != "RUNNING" {
+		t.Errorf("sandbox state = %q, want RUNNING", sb.State)
+	}
+
+	// Lifecycle transitions.
+	for _, path := range []string{"/v0/sandboxes/" + sb.ID + "/pause", "/v0/sandboxes/" + sb.ID + "/resume"} {
+		if w := call(h, http.MethodPost, path, nil); w.Code != http.StatusOK {
+			t.Errorf("%s = %d: %s", path, w.Code, w.Body)
+		}
+	}
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/snapshot", map[string]string{"tag": "s1"}); w.Code != http.StatusOK {
+		t.Errorf("snapshot = %d: %s", w.Code, w.Body)
+	}
+
+	// Guest proxy.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/exec", guestapi.ExecRequest{Cmd: "echo"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("exec = %d: %s", w.Code, w.Body)
+	}
+	var ex guestapi.ExecResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &ex)
+	if string(ex.Stdout) != "out:echo" {
+		t.Errorf("exec stdout = %q", ex.Stdout)
+	}
+
+	// Kill.
+	if w := call(h, http.MethodDelete, "/v0/sandboxes/"+sb.ID, nil); w.Code != http.StatusNoContent {
+		t.Errorf("kill = %d: %s", w.Code, w.Body)
+	}
+}
+
+func TestServerQuota(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+
+	// max_sandboxes is 2.
+	for i := 0; i < 2; i++ {
+		if w := call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID}); w.Code != http.StatusCreated {
+			t.Fatalf("sandbox %d = %d: %s", i, w.Code, w.Body)
+		}
+	}
+	if w := call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID}); w.Code != http.StatusTooManyRequests {
+		t.Errorf("3rd sandbox = %d, want 429: %s", w.Code, w.Body)
+	}
+}
+
+func TestServerAuthRequired(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+	req := httptest.NewRequest(http.MethodGet, "/v0/templates", nil) // no auth header
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated request = %d, want 401", w.Code)
+	}
+	// healthz is open.
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("healthz = %d, want 200", w.Code)
+	}
+}
