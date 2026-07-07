@@ -76,8 +76,11 @@ func TestChunkedLifecycleKVM(t *testing.T) {
 		t.Fatalf("resume 1: %v", err)
 	}
 	h1 := mustHealth(t, ctx, agent, id)
-	if h1.Seq != h0.Seq+1 {
-		t.Fatalf("seq after resume 1 = %d, want %d (same process must continue)", h1.Seq, h0.Seq+1)
+	// Monotone-above-pause proves the SAME process continued (a reboot
+	// resets to 1). Exact +1 is racy: the resume readiness probe (and any
+	// client-timed-out probe the server still counted) also increments.
+	if h1.Seq <= h0.Seq {
+		t.Fatalf("seq across resume 1 = %d -> %d: not monotonic, guest rebooted?", h0.Seq, h1.Seq)
 	}
 	if h1.Resumes != 1 {
 		t.Fatalf("resumes after resume 1 = %d, want 1", h1.Resumes)
@@ -111,8 +114,8 @@ func TestChunkedLifecycleKVM(t *testing.T) {
 		t.Fatalf("resume 2: %v", err)
 	}
 	h2 := mustHealth(t, ctx, agent, id)
-	if h2.Seq != h1.Seq+1 {
-		t.Fatalf("seq after resume 2 = %d, want %d", h2.Seq, h1.Seq+1)
+	if h2.Seq <= h1.Seq {
+		t.Fatalf("seq across resume 2 = %d -> %d: not monotonic, guest rebooted?", h1.Seq, h2.Seq)
 	}
 	if h2.Resumes != 2 {
 		t.Fatalf("resumes after resume 2 = %d, want 2", h2.Resumes)

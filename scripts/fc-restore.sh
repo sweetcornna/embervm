@@ -226,12 +226,19 @@ if [ -n "$UFFD_PID" ]; then
 fi
 
 # ---------------------------------------------------------------- 6. seq check
+# Continuity = the SAME process continued: seq must be strictly above the
+# snapshot value (a rebooted guest resets to 1). Exact +1 is racy: a probe
+# whose client times out after the server counted it inflates seq by one
+# (seen on v1.15.1 uffd-prefetch when early faults stall behind the bulk
+# prefetch), so monotone-above-snapshot is the correct assertion — same
+# semantics as the nodeagent KVM tests.
 SEQ_EXPECTED=$((SEQ_AT_SNAPSHOT + 1))
-if [ "$SEQ" -eq "$SEQ_EXPECTED" ]; then
+if [ "$SEQ" -ge "$SEQ_EXPECTED" ]; then
   SEQ_OK=true
+  [ "$SEQ" -eq "$SEQ_EXPECTED" ] || log "seq $SEQ above expected $SEQ_EXPECTED (double-counted probe; continuity still proven)"
 else
   SEQ_OK=false
-  log "seq mismatch: got $SEQ, expected $SEQ_EXPECTED"
+  log "seq mismatch: got $SEQ, expected >= $SEQ_EXPECTED (reset means reboot)"
 fi
 
 # ------------------------------------------------------------------- 7. result
