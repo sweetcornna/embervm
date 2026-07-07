@@ -59,6 +59,7 @@ func runDev(args []string) {
 		dbURL       = fs.String("database-url", "postgres:///embervm", "PostgreSQL connection URL")
 		listen      = fs.String("listen", ":8080", "HTTP listen address")
 		tokensFile  = fs.String("tokens-file", "", "JSON file mapping bearer tokens to {owner,max_sandboxes}")
+		insecureDev = fs.Bool("insecure-dev-token", false, "accept the well-known 'dev-token' when no --tokens-file (INSECURE — local trials only)")
 		zfsPool     = fs.String("zfs-pool", "embervm", "ZFS pool for sandbox datasets")
 		plainRoot   = fs.String("plain-root", "", "use a plain-directory storage backend rooted here instead of ZFS")
 		netnsPool   = fs.Int("netns-pool", 24, "number of pre-created netns slots")
@@ -113,13 +114,13 @@ func runDev(args []string) {
 		log.Fatalf("embervm dev: migrate: %v", err)
 	}
 
-	var tokens *controlplane.TokenStore
-	if *tokensFile == "" {
-		log.Printf("embervm dev: WARNING no --tokens-file; using dev token %q (owner dev, max 100)",
+	tokens, usedInsecure, err := controlplane.ResolveTokens(*tokensFile, *insecureDev)
+	if err != nil {
+		log.Fatalf("embervm dev: %v", err)
+	}
+	if usedInsecure {
+		log.Printf("embervm dev: WARNING accepting the well-known %q (owner dev) — do NOT expose this to untrusted networks",
 			controlplane.DevTokenName)
-		tokens = controlplane.DevTokenStore()
-	} else if tokens, err = controlplane.LoadTokensFromFile(*tokensFile); err != nil {
-		log.Fatalf("embervm dev: tokens: %v", err)
 	}
 
 	srv := controlplane.NewServer(store, agent, tokens)

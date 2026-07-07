@@ -52,7 +52,27 @@ func LoadTokensFromFile(path string) (*TokenStore, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("parse tokens file: %w", err)
 	}
+	if len(m) == 0 {
+		return nil, fmt.Errorf("tokens file %s defines no tokens", path)
+	}
 	return NewTokenStore(m), nil
+}
+
+// ResolveTokens picks the token source for a server, failing closed: a tokens
+// file wins; otherwise the well-known insecure dev token is used ONLY when
+// allowInsecureDevToken is explicitly set. With neither, it returns an error
+// rather than silently exposing the API. usedInsecure signals the caller to
+// print a warning.
+func ResolveTokens(tokensFile string, allowInsecureDevToken bool) (store *TokenStore, usedInsecure bool, err error) {
+	if tokensFile != "" {
+		store, err = LoadTokensFromFile(tokensFile)
+		return store, false, err
+	}
+	if allowInsecureDevToken {
+		return DevTokenStore(), true, nil
+	}
+	return nil, false, fmt.Errorf("no authentication configured: pass --tokens-file, " +
+		"or --insecure-dev-token to accept the well-known dev token (trials only)")
 }
 
 const ctxTokenKey = "embervm.token"

@@ -33,7 +33,7 @@ EMBERVM_PID=""
 WORK_DIR="$(mktemp -d)"
 cleanup() {
   rc=$?
-  [ -n "$EMBERVM_PID" ] && kill "$EMBERVM_PID" 2>/dev/null || true
+  if [ -n "$EMBERVM_PID" ]; then kill "$EMBERVM_PID" 2>/dev/null || true; fi
   for id in $(seq 0 5); do bash "$ROOT/scripts/teardown-network.sh" --id "$id" >/dev/null 2>&1 || true; done
   pkill -f "firecracker-$FC_VERSION-$ARCH" 2>/dev/null || true
   pkill -f "$BIN_DIR/uffd-handler" 2>/dev/null || true
@@ -57,6 +57,7 @@ log "starting embervm dev"
 "$BIN_DIR/embervm" dev \
   --database-url "$DB_URL" \
   --listen ":8080" \
+  --insecure-dev-token \
   --plain-root "$WORK_DIR/storage" \
   --netns-pool 4 \
   --script-dir "$ROOT/scripts" \
@@ -77,12 +78,12 @@ curl -sf "http://$API/healthz" >/dev/null || { cat "$WORK_DIR/embervm.log" >&2; 
 log "create template"
 TID=$(curl -sf -XPOST "http://$API/v0/templates" -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"name":"web","image":"alpine:3.20"}' | jq -r .id)
-[ -n "$TID" ] && [ "$TID" != null ] || die "template create returned no id"
+if [ -z "$TID" ] || [ "$TID" = null ]; then die "template create returned no id"; fi
 
 log "create sandbox"
 SID=$(curl -sf -XPOST "http://$API/v0/sandboxes" -H "$AUTH" -H 'Content-Type: application/json' \
   -d "{\"template_id\":\"$TID\",\"vcpus\":1,\"memory_mib\":256,\"data_disk_gib\":1}" | jq -r .id)
-[ -n "$SID" ] && [ "$SID" != null ] || die "sandbox create returned no id"
+if [ -z "$SID" ] || [ "$SID" = null ]; then die "sandbox create returned no id"; fi
 
 log "exec in sandbox"
 OUT=$(curl -sf -XPOST "http://$API/v0/sandboxes/$SID/exec" -H "$AUTH" -H 'Content-Type: application/json' \

@@ -3,10 +3,50 @@ package controlplane
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestResolveTokensFailsClosed(t *testing.T) {
+	// No file and no insecure opt-in => error, never a silently-open server.
+	if _, _, err := ResolveTokens("", false); err == nil {
+		t.Error("ResolveTokens('', false) = nil error, want fail-closed error")
+	}
+
+	// Insecure opt-in => the dev token store, flagged as insecure.
+	store, insecure, err := ResolveTokens("", true)
+	if err != nil || store == nil || !insecure {
+		t.Errorf("ResolveTokens('', true) = (%v, %v, %v), want (store, true, nil)", store, insecure, err)
+	}
+	if _, ok := store.Lookup(DevTokenName); !ok {
+		t.Error("insecure store missing the dev token")
+	}
+
+	// A real tokens file => that store, not flagged insecure.
+	f := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(f, []byte(`{"secret-tok":{"owner":"alice","max_sandboxes":5}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, insecure, err = ResolveTokens(f, false)
+	if err != nil || insecure {
+		t.Fatalf("ResolveTokens(file, false) = (insecure=%v, err=%v)", insecure, err)
+	}
+	if info, ok := store.Lookup("secret-tok"); !ok || info.Owner != "alice" {
+		t.Errorf("file token not loaded: %+v ok=%v", info, ok)
+	}
+
+	// An empty tokens file is an error, not an open server.
+	empty := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(empty, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ResolveTokens(empty, false); err == nil {
+		t.Error("ResolveTokens(empty-file, false) = nil error, want error")
+	}
+}
 
 func TestBearerToken(t *testing.T) {
 	cases := []struct {

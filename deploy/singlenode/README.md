@@ -36,11 +36,13 @@ sudo systemctl start embervm
 
 ## Smoke test
 
-The install prints a dev token (`dev-token`). Drive the full lifecycle:
+The installer generates a random API token and stores it root-only in
+`/etc/embervm/tokens.json`. Retrieve it and drive the full lifecycle:
 
 ```bash
 API=localhost:8080
-AUTH='Authorization: Bearer dev-token'
+TOKEN=$(sudo jq -r 'keys[0]' /etc/embervm/tokens.json)
+AUTH="Authorization: Bearer $TOKEN"
 
 # Build a template from a Docker image (pull → flatten → guestd → ext4).
 TID=$(curl -sXPOST $API/v0/templates -H "$AUTH" -H 'Content-Type: application/json' \
@@ -74,9 +76,11 @@ sudo bash deploy/singlenode/install.sh --no-systemd
 - **Storage**: `--pool-device` gives a real ZFS pool; the default loopback pool
   is for trials only. The data disk is a sparse raw file on the dataset — a
   15 GiB disk costs nothing until written (docs/zh/04 §1).
-- **Auth**: with no `--tokens-file`, a single `dev-token` is used (owner `dev`,
-  quota 100). Provide a JSON `token → {owner, max_sandboxes}` file for real
-  multi-tenant use.
+- **Auth is fail-closed**: the server refuses to start without a `--tokens-file`
+  (a JSON `token → {owner, max_sandboxes}` map). The installer generates one
+  automatically. For a throwaway *local* trial you can instead run
+  `embervm dev --insecure-dev-token`, which accepts the well-known `dev-token`
+  — never expose that to an untrusted network.
 - **Jailer / host hardening** (chroot, per-VM uid/gid, seccomp) is an **M4**
   item (docs/zh/03); M1 isolates sandboxes with per-namespace networking and
   best-effort cgroup v2.

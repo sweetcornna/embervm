@@ -18,9 +18,11 @@ die() { log "ERROR: $*"; exit 1; }
 POOL_NAME="embervm"
 POOL_DEVICE=""              # real block device; empty => loopback file
 POOL_SIZE_GB="20"          # loopback file size when POOL_DEVICE is empty
-DB_URL="postgres:///embervm"
 LISTEN=":8080"
 NO_SYSTEMD=false
+CONF_DIR="/etc/embervm"
+ENV_FILE="$CONF_DIR/embervm.env"     # root-only: DB URL (with password)
+TOKENS_FILE="$CONF_DIR/tokens.json"  # root-only: API bearer tokens
 
 usage() {
   cat >&2 <<EOF
@@ -29,9 +31,11 @@ usage: sudo bash install.sh [options]
   --pool-device DEV   use real block device DEV for the ZFS pool (DESTRUCTIVE)
   --pool-size-gb N    loopback pool size in GiB when no device given (default $POOL_SIZE_GB)
   --pool-name NAME    ZFS pool name (default $POOL_NAME)
-  --database-url URL  PostgreSQL URL (default $DB_URL)
   --listen ADDR       API listen address (default $LISTEN)
   --no-systemd        do not install/enable the systemd unit
+
+Credentials (PostgreSQL password + API token) are generated on first run and
+stored root-only under $CONF_DIR; re-runs reuse them.
 EOF
 }
 
@@ -40,7 +44,6 @@ while [ "$#" -gt 0 ]; do
     --pool-device)  POOL_DEVICE="${2:?}"; shift 2 ;;
     --pool-size-gb) POOL_SIZE_GB="${2:?}"; shift 2 ;;
     --pool-name)    POOL_NAME="${2:?}"; shift 2 ;;
-    --database-url) DB_URL="${2:?}"; shift 2 ;;
     --listen)       LISTEN="${2:?}"; shift 2 ;;
     --no-systemd)   NO_SYSTEMD=true; shift ;;
     -h|--help)      usage; exit 0 ;;
@@ -54,19 +57,48 @@ done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_DIR="/var/lib/embervm"
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$CONF_DIR"
+chmod 700 "$CONF_DIR"
 
 # 1. Packages.
-log "installing packages (postgresql, zfsutils-linux, e2fsprogs, iproute2, curl, make, golang)"
+log "installing packages (postgresql, zfsutils-linux, e2fsprogs, iproute2, curl, make, golang, openssl)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y >&2
-apt-get install -y postgresql zfsutils-linux e2fsprogs iproute2 curl make golang-go >&2
+apt-get install -y postgresql zfsutils-linux e2fsprogs iproute2 curl make golang-go openssl >&2
 
-# 2. PostgreSQL role + database (idempotent).
+# 2. Credentials: generate on first run, reuse thereafter (never hardcoded).
+if [ -f "$ENV_FILE" ]; then
+  log "reusing existing credentials in $ENV_FILE"
+  # shellcheck source=/dev/null
+  . "$ENV_FILE"
+  DB_PASSWORD="${EMBERVM_DB_PASSWORD:?corrupt env file: EMBERVM_DB_PASSWORD missing}"
+  API_TOKEN="${EMBERVM_API_TOKEN:?corrupt env file: EMBERVM_API_TOKEN missing}"
+else
+  log "generating fresh PostgreSQL password + API token"
+  DB_PASSWORD="$(openssl rand -hex 16)"
+  API_TOKEN="$(openssl rand -hex 24)"
+fi
+DB_URL="postgres://embervm:${DB_PASSWORD}@localhost/embervm?sslmode=disable"
+umask 077
+cat > "$ENV_FILE" <<EOF
+EMBERVM_DB_PASSWORD=$DB_PASSWORD
+EMBERVM_API_TOKEN=$API_TOKEN
+EMBERVM_DATABASE_URL=$DB_URL
+EOF
+chmod 600 "$ENV_FILE"
+printf '{"%s": {"owner": "admin", "max_sandboxes": 100}}\n' "$API_TOKEN" > "$TOKENS_FILE"
+chmod 600 "$TOKENS_FILE"
+umask 022
+
+# 3. PostgreSQL role + database (idempotent); always sync the role password to
+# the generated one so TCP auth matches (no hardcoded credential anywhere).
 log "ensuring postgres role/db 'embervm'"
 systemctl enable --now postgresql >&2 || true
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='embervm'" | grep -q 1 \
-  || sudo -u postgres psql -c "CREATE ROLE embervm LOGIN PASSWORD 'embervm'" >&2
+if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='embervm'" | grep -q 1; then
+  sudo -u postgres psql -c "ALTER ROLE embervm LOGIN PASSWORD '$DB_PASSWORD'" >&2
+else
+  sudo -u postgres psql -c "CREATE ROLE embervm LOGIN PASSWORD '$DB_PASSWORD'" >&2
+fi
 sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='embervm'" | grep -q 1 \
   || sudo -u postgres createdb -O embervm embervm >&2
 
@@ -94,7 +126,8 @@ ARCH="${ARCH:-x86_64}"
 KERNEL="$ROOT/assets/vmlinux-6.1.155"
 FC_BIN="$ROOT/assets/release-$FC_VERSION-$ARCH/firecracker-$FC_VERSION-$ARCH"
 
-# 5. systemd unit.
+# 5. systemd unit. The DB URL (with password) comes from the root-only
+# EnvironmentFile so it never lands in the world-readable unit file.
 if [ "$NO_SYSTEMD" = false ]; then
   UNIT=/etc/systemd/system/embervm.service
   log "installing systemd unit $UNIT"
@@ -105,8 +138,10 @@ After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
+EnvironmentFile=$ENV_FILE
 ExecStart=$ROOT/bin/embervm dev \\
-  --database-url $DB_URL \\
+  --database-url \${EMBERVM_DATABASE_URL} \\
+  --tokens-file $TOKENS_FILE \\
   --listen $LISTEN \\
   --zfs-pool $POOL_NAME \\
   --script-dir $ROOT/scripts \\
@@ -125,9 +160,12 @@ EOF
   systemctl enable embervm.service >&2
   log "start it with: systemctl start embervm"
 else
-  log "skipping systemd (--no-systemd); run manually:"
-  echo "sudo $ROOT/bin/embervm dev --database-url $DB_URL --listen $LISTEN --zfs-pool $POOL_NAME --script-dir $ROOT/scripts --work-dir $STATE_DIR/work --kernel $KERNEL --fc-bin $FC_BIN --uffd-handler $ROOT/bin/uffd-handler --guestd-bin $ROOT/bin/guestd" >&2
+  log "skipping systemd (--no-systemd); run manually with:"
+  echo "sudo env EMBERVM_DATABASE_URL='$DB_URL' $ROOT/bin/embervm dev --database-url \"\$EMBERVM_DATABASE_URL\" --tokens-file $TOKENS_FILE --listen $LISTEN --zfs-pool $POOL_NAME --script-dir $ROOT/scripts --work-dir $STATE_DIR/work --kernel $KERNEL --fc-bin $FC_BIN --uffd-handler $ROOT/bin/uffd-handler --guestd-bin $ROOT/bin/guestd" >&2
 fi
 
-log "done. Dev token: 'dev-token'. Try:"
-echo "  curl -sXPOST localhost${LISTEN}/v0/templates -H 'Authorization: Bearer dev-token' -H 'Content-Type: application/json' -d '{\"name\":\"web\",\"image\":\"alpine:3.20\"}'" >&2
+log "done. API bearer token is stored in $TOKENS_FILE (root-only). Retrieve it with:"
+echo "  sudo jq -r 'keys[0]' $TOKENS_FILE" >&2
+log "then try:"
+echo "  TOKEN=\$(sudo jq -r 'keys[0]' $TOKENS_FILE)" >&2
+echo "  curl -sXPOST localhost${LISTEN}/v0/templates -H \"Authorization: Bearer \$TOKEN\" -H 'Content-Type: application/json' -d '{\"name\":\"web\",\"image\":\"alpine:3.20\"}'" >&2
