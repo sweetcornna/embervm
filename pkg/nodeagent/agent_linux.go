@@ -411,7 +411,9 @@ func (a *Agent) waitGuest(ctx context.Context, sb *sandbox, timeout time.Duratio
 		if err == nil {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		// Fine-grained so resume-readiness (and its measured latency) is not
+		// quantized coarsely; the exit-criteria hot-resume budget is <1s.
+		time.Sleep(20 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout after %s", timeout)
 }

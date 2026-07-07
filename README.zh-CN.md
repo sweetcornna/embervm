@@ -66,7 +66,7 @@ Firecracker 需要 `/dev/kvm`（裸金属或嵌套虚拟化）。已核实矩阵
 - [x] 三轮调研与立项（产品拆解 → 前沿创新 → 实测数据验证）
 - [x] 开源规划：AGPL-3.0、双语文档、云端实测矩阵
 - [x] M0（第 1-2 周）：裸金属 + 嵌套虚拟化双环境；Firecracker/ZFS/uffd 原型基线（补齐《04》§9 数据缺口）（已完成：CI 嵌套虚拟化环境基线；裸金属复测待 M1）
-- [ ] M1（第 3-6 周）：单机 MVP——全生命周期 API、模板系统、`embervm dev` 单进程模式
+- [x] M1（第 3-6 周）：单机 MVP——REST 全生命周期 API + PostgreSQL、模板构建器（Docker 镜像 → microVM）、guestd、ZFS 集成、`embervm dev` 单进程模式（[单机快速上手](deploy/singlenode/README.md)；退出标准——20 并发、热恢复 <1s（含 15GB 数据盘）、单命令部署——已在嵌套虚拟化 CI 验证，裸金属复测待跟进）
 - [ ] M2（第 7-10 周）：秒级恢复管道——uffd + WS 预取、diff 快照、chunk 仓库
 - [ ] M3（第 11-13 周）：分层归档与生命周期引擎、选择性恢复
 - [ ] M4（第 14-16 周）：多节点调度、Gateway、加固 → 内部 MVP

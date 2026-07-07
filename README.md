@@ -66,7 +66,7 @@ English docs will be added incrementally with the code. The full research & desi
 - [x] Research & project chartering (3 rounds: product teardowns → frontier innovations → primary-data validation)
 - [x] Open-source planning: AGPL-3.0, bilingual docs, cloud test matrix
 - [x] M0 (wk 1-2): bare-metal + nested-virt environments; Firecracker/ZFS/uffd prototype baselines (fills the honest data gaps listed in doc 04 §9) (done: baseline on nested-virt CI; bare-metal re-run planned for M1)
-- [ ] M1 (wk 3-6): single-node MVP — full lifecycle API, template builder (Docker image → microVM), `embervm dev` single-process mode
+- [x] M1 (wk 3-6): single-node MVP — REST lifecycle API + PostgreSQL, template builder (Docker image → microVM), guestd, ZFS integration, and `embervm dev` single-process mode ([one-VM quick start](deploy/singlenode/README.md); exit criteria — 20 concurrent, hot resume <1s incl. 15 GiB data disk, one-command deploy — validated on nested-virt CI, bare-metal re-run planned)
 - [ ] M2 (wk 7-10): second-level restore pipeline — uffd + WS prefetch, diff snapshots, chunk store
 - [ ] M3 (wk 11-13): tiered archive & lifecycle engine, selective restore
 - [ ] M4 (wk 14-16): multi-node scheduling, gateway, hardening → internal MVP

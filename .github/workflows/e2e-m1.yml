@@ -1,0 +1,94 @@
+name: e2e-m1
+
+# M1 exit-criteria gate (docs/zh/03 §3): 单机 20 并发; 热恢复 <1s（含 15GB 数据盘）;
+# 单台云 VM 可完整部署. Numbers are CI-relative per docs/adr/0001 (nested
+# virtualization); bare-metal re-measurement is a tracked follow-up.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  exit-criteria:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle || true
+          for _ in $(seq 1 30); do test -w /dev/kvm && break; sleep 1; done
+          test -w /dev/kvm
+
+      - name: Enable unprivileged userfaultfd
+        run: sudo sysctl -w vm.unprivileged_userfaultfd=1
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq e2fsprogs
+
+      - name: Free runner disk space
+        run: bash scripts/ci-free-disk.sh
+
+      - name: Cache assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-v1.16.1-${{ hashFiles('scripts/assets.sha256') }}
+
+      - name: Build host binaries
+        run: make build
+
+      - name: Fetch assets
+        run: sudo -E env "PATH=$PATH" FC_VERSION=v1.16.1 bash scripts/fetch-assets.sh
+
+      - name: Run exit-criteria tests (20 concurrent; hot resume <1s w/ 15GiB data)
+        env:
+          EMBERVM_KVM_TESTS: "1"
+          EMBERVM_KERNEL: assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: bin/uffd-handler
+          EMBERVM_GUESTD_BIN: bin/guestd
+          EMBERVM_SCRIPT_DIR: scripts
+        run: |
+          sudo -E env "PATH=$PATH" \
+            go test ./pkg/nodeagent/ -run 'TestConcurrency20|TestHotResumeUnder1s15GiB' -v -count=1 -timeout 30m
+
+      - name: Upload VM logs on failure
+        if: failure()
+        run: sudo chmod -R a+rX /tmp 2>/dev/null || true
+
+  install:
+    # Prove the single-node installer provisions a node from a stock runner
+    # (PostgreSQL + loopback ZFS pool + build + credentials), stopping before
+    # it would start the long-running service (--no-systemd).
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run install.sh (no systemd)
+        run: sudo bash deploy/singlenode/install.sh --no-systemd --pool-size-gb 2
+
+      - name: Verify credentials + binaries were provisioned
+        run: |
+          test -f /etc/embervm/tokens.json
+          sudo test "$(sudo stat -c '%a' /etc/embervm/tokens.json)" = 600
+          test -x bin/embervm
+          sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='embervm'" | grep -q 1
+          zpool list embervm
+          echo "install.sh provisioned a node (db + pool + binaries + root-only creds)"

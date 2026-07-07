@@ -4,70 +4,21 @@ package nodeagent_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/embervm/embervm/pkg/guestapi"
-	"github.com/embervm/embervm/pkg/netns"
-	"github.com/embervm/embervm/pkg/nodeagent"
 	"github.com/embervm/embervm/pkg/nodeapi"
-	"github.com/embervm/embervm/pkg/storage"
 )
 
 // TestAgentLifecycleKVM boots a real template microVM and drives the full M1
-// lifecycle: create → guestd health(seq 1) → exec → file R/W → pause → resume
-// → guestd health(seq 2, proving the SAME process survived) → stop. It is
-// gated behind EMBERVM_KVM_TESTS=1 and needs root, /dev/kvm, and asset paths
-// supplied by the CI job; anything missing SKIPs.
+// lifecycle: create → guestd health → exec → file R/W → pause → resume →
+// guestd health (monotone seq, proving the SAME process survived) → stop. It
+// is gated behind EMBERVM_KVM_TESTS=1 and needs root, /dev/kvm, and asset
+// paths supplied by the CI job; anything missing SKIPs.
 func TestAgentLifecycleKVM(t *testing.T) {
-	if os.Getenv("EMBERVM_KVM_TESTS") != "1" {
-		t.Skip("set EMBERVM_KVM_TESTS=1 to run the KVM lifecycle test")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("KVM lifecycle test needs root")
-	}
-	env := func(k string) string { return os.Getenv(k) }
-	kernel, fcBin := env("EMBERVM_KERNEL"), env("EMBERVM_FC_BIN")
-	uffdBin, guestdBin := env("EMBERVM_UFFD_BIN"), env("EMBERVM_GUESTD_BIN")
-	scriptDir := env("EMBERVM_SCRIPT_DIR")
-	image := env("EMBERVM_TEST_IMAGE")
-	if image == "" {
-		image = "alpine:3.20"
-	}
-	for name, p := range map[string]string{
-		"EMBERVM_KERNEL": kernel, "EMBERVM_FC_BIN": fcBin,
-		"EMBERVM_UFFD_BIN": uffdBin, "EMBERVM_GUESTD_BIN": guestdBin,
-		"EMBERVM_SCRIPT_DIR": scriptDir,
-	} {
-		if p == "" {
-			t.Skipf("%s not set", name)
-		}
-		if _, err := os.Stat(p); err != nil {
-			t.Skipf("%s=%s not found: %v", name, p, err)
-		}
-	}
-
+	agent, image := kvmAgent(t, 2)
 	ctx := context.Background()
-	pool := netns.NewPool(scriptDir, 2)
-	if err := pool.Setup(ctx); err != nil {
-		t.Fatalf("netns pool setup: %v", err)
-	}
-	t.Cleanup(func() { _ = pool.Teardown(ctx) })
-
-	agent, err := nodeagent.New(nodeagent.Config{
-		Storage:        storage.NewPlainBackend(t.TempDir()),
-		Pool:           pool,
-		WorkDir:        t.TempDir(),
-		KernelPath:     kernel,
-		FCBin:          fcBin,
-		UffdHandlerBin: uffdBin,
-		GuestdBin:      guestdBin,
-		RestoreMode:    "prefetch",
-	})
-	if err != nil {
-		t.Fatalf("nodeagent.New: %v", err)
-	}
 
 	if err := agent.BuildTemplate(ctx, "t1", image); err != nil {
 		t.Fatalf("BuildTemplate(%s): %v", image, err)
