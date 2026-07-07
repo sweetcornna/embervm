@@ -28,6 +28,11 @@ const version = "v0.1.0-m1"
 // childEnv marks the forked server child so it skips init duties.
 const childEnv = "EMBERVM_GUESTD_CHILD"
 
+// defaultPATH is applied when the guest kernel hands PID 1 an empty PATH, so
+// exec resolves bare command names (e.g. "echo") and child processes inherit
+// a usable PATH.
+const defaultPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 func main() {
 	addr := flag.String("addr", fmt.Sprintf(":%d", guestapi.Port), "HTTP listen address")
 	flag.Parse()
@@ -38,6 +43,10 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	if os.Getenv("PATH") == "" {
+		_ = os.Setenv("PATH", defaultPATH)
 	}
 
 	fmt.Printf("guestd listening addr=%s pid=%d version=%s\n", *addr, os.Getpid(), version)

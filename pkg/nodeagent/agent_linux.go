@@ -1,0 +1,455 @@
+//go:build linux
+
+package nodeagent
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/embervm/embervm/pkg/fcclient"
+	"github.com/embervm/embervm/pkg/guestapi"
+	"github.com/embervm/embervm/pkg/lifecycle"
+	"github.com/embervm/embervm/pkg/netns"
+	"github.com/embervm/embervm/pkg/nodeapi"
+	"github.com/embervm/embervm/pkg/template"
+)
+
+// guestMAC is the fixed guest NIC address (matches scripts/fc-boot.sh).
+const guestMAC = "06:00:AC:10:00:02"
+
+// baseBootArgs configures the guest to bring up eth0 at 172.16.0.2 and boot
+// guestd as PID 1; docs/zh/04 §5 microVM args are appended from Config.
+const baseBootArgs = "console=ttyS0 reboot=k panic=1 pci=off " +
+	"ip=172.16.0.2::172.16.0.1:255.255.255.252:ember:eth0:off " +
+	"init=/usr/local/bin/guestd"
+
+// defaultExtraArgs is docs/zh/04 §5's microVM kernel command line.
+const defaultExtraArgs = "8250.nr_uarts=0 swiotlb=noforce"
+
+type sandbox struct {
+	id        string
+	machine   *lifecycle.Machine
+	lease     netns.Lease
+	dir       string
+	vcpus     int
+	memMiB    int
+	rootfs    string
+	dataRaw   string
+	fc        *exec.Cmd
+	uffd      *exec.Cmd
+	snapCount int
+	guest     *guestapi.Client
+}
+
+// Agent is the concrete linux node agent.
+type Agent struct {
+	cfg Config
+	mu  sync.Mutex
+	sbx map[string]*sandbox
+}
+
+var _ nodeapi.Agent = (*Agent)(nil)
+
+// New constructs a node agent. It fills defaults but does not create the
+// netns pool (call Config.Pool.Setup separately at daemon start).
+func New(cfg Config) (nodeapi.Agent, error) {
+	if cfg.Storage == nil || cfg.Pool == nil {
+		return nil, fmt.Errorf("nodeagent: Storage and Pool are required")
+	}
+	if cfg.WorkDir == "" || cfg.KernelPath == "" || cfg.FCBin == "" || cfg.GuestdBin == "" {
+		return nil, fmt.Errorf("nodeagent: WorkDir, KernelPath, FCBin, GuestdBin are required")
+	}
+	if cfg.RestoreMode == "" {
+		cfg.RestoreMode = "prefetch"
+	}
+	if cfg.CgroupRoot == "" {
+		cfg.CgroupRoot = "/sys/fs/cgroup/embervm"
+	}
+	if cfg.BootExtraArgs == "" {
+		cfg.BootExtraArgs = defaultExtraArgs
+	}
+	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
+		return nil, err
+	}
+	return &Agent{cfg: cfg, sbx: map[string]*sandbox{}}, nil
+}
+
+// BuildTemplate builds a rootfs from image and imports it as a template.
+func (a *Agent) BuildTemplate(ctx context.Context, templateID, image string) error {
+	out := filepath.Join(a.cfg.WorkDir, "build-"+templateID+".ext4")
+	defer os.Remove(out)
+	if _, err := template.Build(ctx, template.BuildInput{
+		Image:      image,
+		GuestdPath: a.cfg.GuestdBin,
+		OutPath:    out,
+	}); err != nil {
+		return fmt.Errorf("build template %s: %w", templateID, err)
+	}
+	return a.cfg.Storage.EnsureTemplate(ctx, templateID, out)
+}
+
+// CreateSandbox clones storage, boots a microVM, and waits for guestd.
+func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
+	if req.VCPUs == 0 {
+		req.VCPUs = 1
+	}
+	if req.MemoryMiB == 0 {
+		req.MemoryMiB = 256
+	}
+	if req.DataDiskGiB == 0 {
+		req.DataDiskGiB = 15
+	}
+
+	m := lifecycle.New(lifecycle.StatePending)
+	_ = m.To(lifecycle.StateStarting)
+
+	paths, err := a.cfg.Storage.CloneSandbox(ctx, req.SandboxID, req.TemplateID, req.DataDiskGiB)
+	if err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+	lease, err := a.cfg.Pool.Acquire()
+	if err != nil {
+		_ = a.cfg.Storage.DestroySandbox(ctx, req.SandboxID)
+		return nodeapi.SandboxStatus{}, err
+	}
+
+	sb := &sandbox{
+		id:      req.SandboxID,
+		machine: m,
+		lease:   lease,
+		dir:     filepath.Join(a.cfg.WorkDir, req.SandboxID),
+		vcpus:   req.VCPUs,
+		memMiB:  req.MemoryMiB,
+		rootfs:  paths.RootfsExt4,
+		dataRaw: paths.DataRaw,
+	}
+	if err := os.MkdirAll(sb.dir, 0o755); err != nil {
+		a.cleanup(ctx, sb)
+		return nodeapi.SandboxStatus{}, err
+	}
+	if err := a.bootFresh(ctx, sb); err != nil {
+		a.cleanup(ctx, sb)
+		return nodeapi.SandboxStatus{}, err
+	}
+	_ = m.To(lifecycle.StateRunning)
+
+	a.mu.Lock()
+	a.sbx[req.SandboxID] = sb
+	a.mu.Unlock()
+
+	if err := a.waitGuest(ctx, sb, 30*time.Second); err != nil {
+		return nodeapi.SandboxStatus{}, fmt.Errorf("guestd did not come up: %w", err)
+	}
+	return a.statusLocked(sb), nil
+}
+
+// bootFresh starts a Firecracker process in the sandbox netns and drives the
+// full boot API sequence.
+func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
+	apiSock := filepath.Join(sb.dir, "fc.sock")
+	_ = os.Remove(apiSock)
+	fc := exec.Command("ip", "netns", "exec", sb.lease.Netns,
+		a.cfg.FCBin, "--api-sock", apiSock)
+	logf, _ := os.Create(filepath.Join(sb.dir, "fc.log"))
+	if logf != nil {
+		fc.Stdout, fc.Stderr = logf, logf
+	}
+	if err := fc.Start(); err != nil {
+		return fmt.Errorf("start firecracker: %w", err)
+	}
+	sb.fc = fc
+	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
+
+	if err := waitSocket(apiSock, 5*time.Second); err != nil {
+		return err
+	}
+	c := fcclient.New(apiSock)
+	bootArgs := baseBootArgs + " " + a.cfg.BootExtraArgs
+	steps := []func() error{
+		func() error {
+			return c.PutMachineConfig(ctx, fcclient.MachineConfig{VCPUCount: sb.vcpus, MemSizeMiB: sb.memMiB})
+		},
+		func() error {
+			return c.PutBootSource(ctx, fcclient.BootSource{KernelImagePath: a.cfg.KernelPath, BootArgs: bootArgs})
+		},
+		func() error {
+			return c.PutDrive(ctx, fcclient.Drive{DriveID: "rootfs", PathOnHost: sb.rootfs, IsRootDevice: true})
+		},
+		func() error {
+			return c.PutDrive(ctx, fcclient.Drive{DriveID: "data", PathOnHost: sb.dataRaw})
+		},
+		func() error {
+			return c.PutNetworkInterface(ctx, fcclient.NetworkInterface{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: "tap0"})
+		},
+		func() error { return c.InstanceStart(ctx) },
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
+	}
+	sb.guest = a.guestClient(sb)
+	return nil
+}
+
+// PauseSandbox snapshots the VM (Full) and kills the process.
+func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return err
+	}
+	if err := sb.machine.To(lifecycle.StatePausing); err != nil {
+		return err
+	}
+	apiSock := filepath.Join(sb.dir, "fc.sock")
+	c := fcclient.New(apiSock)
+	if err := c.PatchVMState(ctx, "Paused"); err != nil {
+		return err
+	}
+	snapDir := filepath.Join(sb.dir, "snap")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		return err
+	}
+	if err := c.CreateSnapshot(ctx, fcclient.SnapshotCreate{
+		SnapshotPath: filepath.Join(snapDir, "snapfile"),
+		MemFilePath:  filepath.Join(snapDir, "memfile"),
+	}); err != nil {
+		return err
+	}
+	a.killFC(sb)
+	sb.snapCount++
+	if _, err := a.cfg.Storage.Snapshot(ctx, sandboxID, "p"+strconv.Itoa(sb.snapCount)); err != nil {
+		return err
+	}
+	return sb.machine.To(lifecycle.StatePausedHot)
+}
+
+// ResumeSandbox restores the VM from its snapshot via the uffd handler.
+func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.SandboxStatus, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+	if err := sb.machine.To(lifecycle.StateResuming); err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+	snapDir := filepath.Join(sb.dir, "snap")
+	uffdSock := filepath.Join(snapDir, "uffd.sock")
+	_ = os.Remove(uffdSock)
+
+	// Start the memory handler (listens on uffdSock) before FC connects.
+	uffd := exec.Command(a.cfg.UffdHandlerBin,
+		"--socket", uffdSock,
+		"--memfile", filepath.Join(snapDir, "memfile"),
+		"--mode", a.cfg.RestoreMode)
+	ulog, _ := os.Create(filepath.Join(sb.dir, "uffd.log"))
+	if ulog != nil {
+		uffd.Stdout, uffd.Stderr = ulog, ulog
+	}
+	if err := uffd.Start(); err != nil {
+		return nodeapi.SandboxStatus{}, fmt.Errorf("start uffd handler: %w", err)
+	}
+	sb.uffd = uffd
+	if err := waitSocket(uffdSock, 5*time.Second); err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+
+	apiSock := filepath.Join(sb.dir, "fc.sock")
+	_ = os.Remove(apiSock)
+	fc := exec.Command("ip", "netns", "exec", sb.lease.Netns, a.cfg.FCBin, "--api-sock", apiSock)
+	flog, _ := os.Create(filepath.Join(sb.dir, "fc-resume.log"))
+	if flog != nil {
+		fc.Stdout, fc.Stderr = flog, flog
+	}
+	if err := fc.Start(); err != nil {
+		return nodeapi.SandboxStatus{}, fmt.Errorf("start firecracker (resume): %w", err)
+	}
+	sb.fc = fc
+	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
+	if err := waitSocket(apiSock, 5*time.Second); err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+
+	c := fcclient.New(apiSock)
+	if err := c.LoadSnapshot(ctx, fcclient.SnapshotLoad{
+		SnapshotPath: filepath.Join(snapDir, "snapfile"),
+		MemBackend:   fcclient.MemBackend{BackendType: "Uffd", BackendPath: uffdSock},
+		ResumeVM:     true,
+	}); err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+	if err := sb.machine.To(lifecycle.StateRunning); err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+	if err := a.waitGuest(ctx, sb, 15*time.Second); err != nil {
+		return nodeapi.SandboxStatus{}, fmt.Errorf("guestd unreachable after resume: %w", err)
+	}
+	return a.statusLocked(sb), nil
+}
+
+// SnapshotSandbox pauses, snapshots, and resumes (a caller-visible snapshot).
+func (a *Agent) SnapshotSandbox(ctx context.Context, sandboxID, tag string) (string, error) {
+	if err := a.PauseSandbox(ctx, sandboxID); err != nil {
+		return "", err
+	}
+	if _, err := a.ResumeSandbox(ctx, sandboxID); err != nil {
+		return "", err
+	}
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return "", err
+	}
+	return sandboxID + "@" + tag + "-" + strconv.Itoa(sb.snapCount), nil
+}
+
+// StopSandbox tears the sandbox down and releases its resources.
+func (a *Agent) StopSandbox(ctx context.Context, sandboxID string) error {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return err
+	}
+	_ = sb.machine.To(lifecycle.StateStopping)
+	a.cleanup(ctx, sb)
+	_ = sb.machine.To(lifecycle.StateStopped)
+	a.mu.Lock()
+	delete(a.sbx, sandboxID)
+	a.mu.Unlock()
+	return nil
+}
+
+// Status returns the current sandbox status.
+func (a *Agent) Status(_ context.Context, sandboxID string) (nodeapi.SandboxStatus, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nodeapi.SandboxStatus{}, err
+	}
+	return a.statusLocked(sb), nil
+}
+
+// Exec runs a command in the guest via guestd.
+func (a *Agent) Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return sb.guest.Exec(ctx, req)
+}
+
+// Health probes guestd.
+func (a *Agent) Health(ctx context.Context, sandboxID string) (*guestapi.HealthResponse, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return sb.guest.Health(ctx)
+}
+
+// ReadFile reads a guest file via guestd.
+func (a *Agent) ReadFile(ctx context.Context, sandboxID, path string) ([]byte, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return sb.guest.ReadFile(ctx, path)
+}
+
+// WriteFile writes a guest file via guestd.
+func (a *Agent) WriteFile(ctx context.Context, sandboxID, path string, mode fs.FileMode, data []byte) error {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return err
+	}
+	return sb.guest.WriteFile(ctx, path, mode, data)
+}
+
+// --- helpers ---------------------------------------------------------------
+
+func (a *Agent) get(id string) (*sandbox, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	sb, ok := a.sbx[id]
+	if !ok {
+		return nil, fmt.Errorf("sandbox %q not found", id)
+	}
+	return sb, nil
+}
+
+func (a *Agent) statusLocked(sb *sandbox) nodeapi.SandboxStatus {
+	return nodeapi.SandboxStatus{
+		SandboxID: sb.id,
+		State:     string(sb.machine.State()),
+		GuestAddr: fmt.Sprintf("%s:%d", sb.lease.GuestIP, guestapi.Port),
+		Netns:     sb.lease.Netns,
+	}
+}
+
+// guestClient builds a guestapi client whose HTTP transport dials into the
+// sandbox netns.
+func (a *Agent) guestClient(sb *sandbox) *guestapi.Client {
+	hc := &http.Client{Transport: &http.Transport{DialContext: sb.lease.DialContext}}
+	return guestapi.NewClient(fmt.Sprintf("http://%s:%d", sb.lease.GuestIP, guestapi.Port), hc)
+}
+
+// waitGuest polls guestd /healthz until it answers or the deadline passes.
+func (a *Agent) waitGuest(ctx context.Context, sb *sandbox, timeout time.Duration) error {
+	if sb.guest == nil {
+		sb.guest = a.guestClient(sb)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		cctx, cancel := context.WithTimeout(ctx, time.Second)
+		_, err := sb.guest.Health(cctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout after %s", timeout)
+}
+
+func (a *Agent) killFC(sb *sandbox) {
+	if sb.fc != nil && sb.fc.Process != nil {
+		_ = sb.fc.Process.Kill()
+		_, _ = sb.fc.Process.Wait()
+		sb.fc = nil
+	}
+}
+
+func (a *Agent) killUffd(sb *sandbox) {
+	if sb.uffd != nil && sb.uffd.Process != nil {
+		_ = sb.uffd.Process.Kill()
+		_, _ = sb.uffd.Process.Wait()
+		sb.uffd = nil
+	}
+}
+
+// cleanup kills processes, releases the netns lease, removes the cgroup, and
+// destroys storage. Safe to call on a partially-constructed sandbox.
+func (a *Agent) cleanup(ctx context.Context, sb *sandbox) {
+	a.killFC(sb)
+	a.killUffd(sb)
+	a.removeCgroup(sb.id)
+	sb.lease.Release()
+	_ = a.cfg.Storage.DestroySandbox(ctx, sb.id)
+}
+
+// waitSocket waits for a unix socket file to appear.
+func waitSocket(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fi, err := os.Stat(path); err == nil && fi.Mode()&fs.ModeSocket != 0 {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for socket %s", path)
+}

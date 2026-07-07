@@ -68,3 +68,59 @@ jobs:
           path: |
             work/**/*.log
           if-no-files-found: ignore
+
+  nodeagent-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        fc_version: ["v1.16.1", "v1.15.1"]
+    concurrency:
+      group: nodeagent-smoke-${{ github.ref }}-${{ matrix.fc_version }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle || true
+          for _ in $(seq 1 30); do test -w /dev/kvm && break; sleep 1; done
+          test -w /dev/kvm
+
+      - name: Enable unprivileged userfaultfd
+        run: sudo sysctl -w vm.unprivileged_userfaultfd=1
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools jq e2fsprogs
+
+      - name: Cache assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-${{ matrix.fc_version }}-${{ hashFiles('scripts/assets.sha256') }}
+
+      - name: Run node agent smoke test
+        run: sudo -E env "PATH=$PATH" FC_VERSION=${{ matrix.fc_version }} bash test/integration/nodeagent-smoke.sh
+
+      - name: Make VM logs readable for artifact upload
+        if: failure()
+        run: sudo chmod -R a+rX work 2>/dev/null || true
+
+      - name: Upload VM logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodeagent-logs-${{ matrix.fc_version }}
+          path: |
+            /tmp/**/fc*.log
+            /tmp/**/uffd*.log
+          if-no-files-found: ignore
