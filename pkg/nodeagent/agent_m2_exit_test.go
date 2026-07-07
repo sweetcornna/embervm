@@ -313,19 +313,32 @@ func TestDiffChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, layer := range []string{"p2", "p3"} {
-		diff, err := memsnap.ReadManifest(filepath.Join(snapDir, "layer-"+layer+".json"))
+	readDiff := func(layer string) *memsnap.Manifest {
+		m, err := memsnap.ReadManifest(filepath.Join(snapDir, "layer-"+layer+".json"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if diff.Kind != memsnap.KindDiff {
-			t.Errorf("%s kind = %s, want diff", layer, diff.Kind)
+		if m.Kind != memsnap.KindDiff {
+			t.Errorf("%s kind = %s, want diff", layer, m.Kind)
 		}
-		db, fb := storedBytes(diff), storedBytes(full)
-		t.Logf("layer %s: %d chunks, %d stored bytes (full root: %d)", layer, len(diff.Chunks), db, fb)
-		if db*4 >= fb {
-			t.Errorf("%s stored %d bytes >= 25%% of full (%d) — dirty-page diffing is not working", layer, db, fb)
-		}
+		t.Logf("layer %s: %d chunks, %d stored bytes (full root: %d)",
+			layer, len(m.Chunks), storedBytes(m), storedBytes(full))
+		return m
+	}
+	p2, p3 := readDiff("p2"), readDiff("p3")
+	fb := storedBytes(full)
+
+	// The claim under test: diff layers scale with what the guest DIRTIED,
+	// not with memory size. Broken dirty tracking would make every diff
+	// restate the whole footprint (≈100% of the full root's stored bytes).
+	// p2 deliberately dirtied 16 MiB of incompressible data, so it must
+	// carry at least that much — but still be well below the full root.
+	if db := storedBytes(p2); db < 16<<20 || db*4 >= fb*3 {
+		t.Errorf("p2 stored %d bytes; want >=16MiB of captured dirty data and <75%% of full (%d) — dirty-page diffing broken", db, fb)
+	}
+	// p3 only wrote a marker file: ambient churn only, far below the root.
+	if db := storedBytes(p3); db*4 >= fb {
+		t.Errorf("p3 stored %d bytes >= 25%% of full (%d) — a no-dirty cycle must produce a small diff", db, fb)
 	}
 }
 
