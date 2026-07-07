@@ -70,7 +70,7 @@ kill_pid_graceful() { # TERM, wait up to 3s, then KILL
 }
 
 # Invoked indirectly via the EXIT trap below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -126,15 +126,23 @@ api_call PUT /snapshot/create "$body"
 kill_pid_graceful "$FC_PID"
 FC_PID=""
 
-# 6. Metadata for consumers (fc-restore.sh asserts seq_at_snapshot + 1).
+# 6. Preserve the drive backing file. The snapfile records the drive's
+#    absolute host path from snapshot time; every restore must recreate a
+#    pristine copy at exactly that path (fc-restore.sh wipes the VM dir).
+DRIVE_PATH="$VM_DIR/rootfs.ext4"
+cp --sparse=always "$DRIVE_PATH" "$OUT/rootfs.ext4"
+
+# 7. Metadata for consumers (fc-restore.sh asserts seq_at_snapshot + 1 and
+#    restores the rootfs copy to drive_path before loading).
 jq -n --argjson mem_mb "$MEM_MB" --argjson vcpus "$VCPUS" --argjson dirty_mb "$DIRTY_MB" \
-  --arg fc_version "$FC_VERSION" --argjson seq "$SEQ" \
-  '{mem_mb: $mem_mb, vcpus: $vcpus, dirty_mb: $dirty_mb, fc_version: $fc_version, seq_at_snapshot: $seq}' \
+  --arg fc_version "$FC_VERSION" --argjson seq "$SEQ" --arg drive_path "$DRIVE_PATH" \
+  '{mem_mb: $mem_mb, vcpus: $vcpus, dirty_mb: $dirty_mb, fc_version: $fc_version,
+    seq_at_snapshot: $seq, drive_path: $drive_path}' \
   > "$OUT/meta.json"
 
-# 7. Report sizes.
+# 8. Report sizes.
 log "snapshot artifact sizes:"
-du -h "$OUT/snapfile" "$OUT/memfile" >&2
+du -h "$OUT/snapfile" "$OUT/memfile" "$OUT/rootfs.ext4" >&2
 log "meta.json: $(cat "$OUT/meta.json")"
 log "done"
 exit 0

@@ -49,6 +49,12 @@ jobs:
       - name: Run smoke test
         run: sudo -E env "PATH=$PATH" FC_VERSION=${{ matrix.fc_version }} bash test/integration/smoke.sh
 
+      - name: Make VM logs readable for artifact upload
+        if: failure()
+        # The jailer chroot under work/jail is uid 123 / mode 0700; the
+        # artifact uploader runs as the runner user and needs traverse+read.
+        run: sudo chmod -R a+rX work 2>/dev/null || true
+
       - name: Upload VM logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

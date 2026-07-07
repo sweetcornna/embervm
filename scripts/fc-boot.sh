@@ -113,7 +113,7 @@ kill_pid_graceful() { # TERM, wait up to 3s, then KILL
 }
 
 # Invoked indirectly via the EXIT trap below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ]; then

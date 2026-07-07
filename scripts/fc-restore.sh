@@ -82,6 +82,15 @@ rm -rf "$VM_DIR"
 mkdir -p "$VM_DIR"
 API_SOCK="$VM_DIR/fc.sock"
 
+# The snapfile records the drive's absolute host path from snapshot time;
+# recreate a pristine copy there so (a) the path exists and (b) disk writes
+# from earlier restore iterations cannot leak into this one.
+DRIVE_PATH=$(jq -r '.drive_path // empty' "$SNAP/meta.json")
+[ -n "$DRIVE_PATH" ] || DRIVE_PATH="$WORK_DIR/vm$ID/rootfs.ext4"
+[ -f "$SNAP/rootfs.ext4" ] || { log "missing $SNAP/rootfs.ext4 — re-run scripts/fc-snapshot.sh"; exit 1; }
+mkdir -p "$(dirname "$DRIVE_PATH")"
+cp --sparse=always "$SNAP/rootfs.ext4" "$DRIVE_PATH"
+
 # --------------------------------------------------------------------- helpers
 FC_PID=""
 UFFD_PID=""
@@ -114,7 +123,7 @@ kill_pid_graceful() { # TERM, wait up to 3s, then KILL
 }
 
 # Invoked indirectly via the EXIT trap below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ]; then
