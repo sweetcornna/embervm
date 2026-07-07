@@ -85,6 +85,13 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 	a.drainUffd(sb, 5*time.Second)
 
 	sink := chunkstore.Bytes{Ctx: ctx, S: a.localStore}
+	// Parent chunks for diff merging must read through L1: after a warm
+	// restore the local cache holds only what the handler fetched so far
+	// (backfill may still be running when the next pause lands).
+	getter := sink
+	if a.l1 != nil {
+		getter = chunkstore.Bytes{Ctx: ctx, S: chunkstore.Tiered{Local: a.localStore, Remote: a.l1}}
+	}
 	opts := memsnap.WriteOptions{
 		LayerID:       layerID,
 		FCVersion:     a.cfg.FCVersion,
@@ -103,7 +110,7 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 		if err != nil {
 			return fmt.Errorf("resolve parent chain: %w", err)
 		}
-		m, err = memsnap.WriteDiffLayer(memfile, opts, parent, sink, sink)
+		m, err = memsnap.WriteDiffLayer(memfile, opts, parent, getter, sink)
 	}
 	if err != nil {
 		return fmt.Errorf("chunkify %s: %w", layerID, err)
