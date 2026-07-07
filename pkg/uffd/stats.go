@@ -18,6 +18,13 @@ type Stats struct {
 	RemoveEvents        atomic.Uint64
 	Regions             atomic.Int64
 	MemTotalBytes       atomic.Uint64
+
+	// ModeChunked counters (M2).
+	ChunksServedFault  atomic.Uint64
+	ChunksPrefetchedWS atomic.Uint64
+	ChunksBackfilled   atomic.Uint64
+	ChunkFetchErrors   atomic.Uint64
+	WSChunksLoaded     atomic.Uint64
 }
 
 // StatsSnapshot is the plain, JSON-serializable view of Stats. Field names
@@ -32,6 +39,12 @@ type StatsSnapshot struct {
 	RemoveEvents        uint64 `json:"remove_events"`
 	Regions             int64  `json:"regions"`
 	MemTotalBytes       uint64 `json:"mem_total_bytes"`
+
+	ChunksServedFault  uint64 `json:"chunks_served_fault"`
+	ChunksPrefetchedWS uint64 `json:"chunks_prefetched_ws"`
+	ChunksBackfilled   uint64 `json:"chunks_backfilled"`
+	ChunkFetchErrors   uint64 `json:"chunk_fetch_errors"`
+	WSChunksLoaded     uint64 `json:"ws_chunks_loaded"`
 }
 
 func (s *Stats) Snapshot() StatsSnapshot {
@@ -45,6 +58,11 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		RemoveEvents:        s.RemoveEvents.Load(),
 		Regions:             s.Regions.Load(),
 		MemTotalBytes:       s.MemTotalBytes.Load(),
+		ChunksServedFault:   s.ChunksServedFault.Load(),
+		ChunksPrefetchedWS:  s.ChunksPrefetchedWS.Load(),
+		ChunksBackfilled:    s.ChunksBackfilled.Load(),
+		ChunkFetchErrors:    s.ChunkFetchErrors.Load(),
+		WSChunksLoaded:      s.WSChunksLoaded.Load(),
 	}
 }
 

@@ -10,8 +10,10 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/embervm/embervm/pkg/memsnap"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,8 +28,14 @@ const (
 	// ModePrefetch additionally streams the whole memory file into the guest
 	// address space in the background, sequentially, while faults are served
 	// concurrently (FaaSnap-style concurrent paging; M0 approximation of the
-	// working-set prefetch that M2 will implement).
+	// working-set prefetch that ModeChunked implements).
 	ModePrefetch Mode = "prefetch"
+	// ModeChunked serves memory from a chunked, compressed, content-addressed
+	// snapshot (pkg/memsnap manifests + a chunk store) instead of a raw
+	// memfile: faults populate whole 16 KiB chunks, the recorded working set
+	// is prefetched eagerly in trace order, and the rest backfills in the
+	// background (M2 restore pipeline: REAP + FaaSnap).
+	ModeChunked Mode = "chunked"
 )
 
 const defaultPrefetchBlock = 4 << 20
@@ -37,7 +45,8 @@ type Config struct {
 	// SocketPath is the unix socket Firecracker connects to; created by New,
 	// removed on Close.
 	SocketPath string
-	// MemfilePath is the snapshot memory file to serve pages from.
+	// MemfilePath is the snapshot memory file to serve pages from
+	// (ModeLazy/ModePrefetch; unused in ModeChunked).
 	MemfilePath string
 	Mode        Mode
 	// PrefetchBlock is the bytes per background UFFDIO_COPY in ModePrefetch
@@ -47,6 +56,15 @@ type Config struct {
 	// (default 120s).
 	HandshakeTimeout time.Duration
 	Verbose          bool
+
+	// ModeChunked inputs: the resolved layer-chain view and a chunk fetcher
+	// (local store, optionally tiered over L1).
+	View   *memsnap.View
+	Chunks ChunkGetter
+	// WSPath, when set, enables working-set handling: replayed as the eager
+	// prefetch order when the file exists, recorded from first-touch fault
+	// order when it does not.
+	WSPath string
 }
 
 // Handler owns one VM's restore: one listening socket, one userfaultfd, one
@@ -63,6 +81,11 @@ type Handler struct {
 	removed  rangeSet
 	stats    Stats
 
+	// ModeChunked state.
+	populated []atomic.Bool // per-chunk fast path around EEXIST round trips
+	faultBuf  []byte        // fault-loop scratch (prefetch has its own)
+	wsRec     *wsRecorder   // non-nil only while recording a first-resume WS
+
 	quit     chan struct{}
 	quitOnce sync.Once
 }
@@ -70,13 +93,22 @@ type Handler struct {
 // New creates the listening socket so that the caller (and Firecracker) can
 // rely on its existence before PUT /snapshot/load is issued.
 func New(cfg Config) (*Handler, error) {
-	if cfg.MemfilePath == "" || cfg.SocketPath == "" {
-		return nil, errors.New("uffd: SocketPath and MemfilePath are required")
+	if cfg.SocketPath == "" {
+		return nil, errors.New("uffd: SocketPath is required")
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = ModeLazy
 	}
-	if cfg.Mode != ModeLazy && cfg.Mode != ModePrefetch {
+	switch cfg.Mode {
+	case ModeLazy, ModePrefetch:
+		if cfg.MemfilePath == "" {
+			return nil, errors.New("uffd: MemfilePath is required in lazy/prefetch modes")
+		}
+	case ModeChunked:
+		if cfg.View == nil || cfg.Chunks == nil {
+			return nil, errors.New("uffd: View and Chunks are required in chunked mode")
+		}
+	default:
 		return nil, fmt.Errorf("uffd: unknown mode %q", cfg.Mode)
 	}
 	if cfg.PrefetchBlock == 0 {
@@ -131,7 +163,13 @@ func (h *Handler) Serve() error {
 	h.stats.HandshakeUnixNs.Store(time.Now().UnixNano())
 	h.stats.Regions.Store(int64(len(mappings)))
 
-	if err := h.mapBacking(); err != nil {
+	var ws *WSTrace
+	if h.cfg.Mode == ModeChunked {
+		if ws, err = h.initChunked(); err != nil {
+			return err
+		}
+		defer h.finishChunked()
+	} else if err := h.mapBacking(); err != nil {
 		return err
 	}
 	h.logf("handshake done: %d region(s), %d bytes guest memory, mode=%s",
@@ -141,8 +179,11 @@ func (h *Handler) Serve() error {
 	// means the VM exited and we should too.
 	go h.watchPeer()
 
-	if h.cfg.Mode == ModePrefetch {
+	switch h.cfg.Mode {
+	case ModePrefetch:
 		go h.prefetch()
+	case ModeChunked:
+		go h.chunkedPrefetch(ws)
 	}
 
 	return h.faultLoop()
@@ -253,6 +294,9 @@ func (h *Handler) handleMsg(msg []byte) error {
 }
 
 func (h *Handler) servePage(addr uint64) error {
+	if h.cfg.Mode == ModeChunked {
+		return h.serveChunkFault(addr)
+	}
 	m := h.regionFor(addr)
 	if m == nil {
 		// Nothing we can do: not our region. The faulting vCPU would hang,
