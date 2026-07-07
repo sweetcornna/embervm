@@ -53,15 +53,26 @@ jobs:
 
       - name: Run exit-criteria tests (20 concurrent; hot resume <1s w/ 15GiB data)
         env:
+          # Absolute paths: `go test ./pkg/nodeagent/` runs with the package
+          # directory as its working dir, so relative asset paths would not
+          # resolve and the tests would silently SKIP (a false green).
           EMBERVM_KVM_TESTS: "1"
-          EMBERVM_KERNEL: assets/vmlinux-6.1.155
-          EMBERVM_FC_BIN: assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
-          EMBERVM_UFFD_BIN: bin/uffd-handler
-          EMBERVM_GUESTD_BIN: bin/guestd
-          EMBERVM_SCRIPT_DIR: scripts
+          EMBERVM_KERNEL: ${{ github.workspace }}/assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: ${{ github.workspace }}/bin/uffd-handler
+          EMBERVM_GUESTD_BIN: ${{ github.workspace }}/bin/guestd
+          EMBERVM_SCRIPT_DIR: ${{ github.workspace }}/scripts
         run: |
+          set -o pipefail
           sudo -E env "PATH=$PATH" \
-            go test ./pkg/nodeagent/ -run 'TestConcurrency20|TestHotResumeUnder1s15GiB' -v -count=1 -timeout 30m
+            go test ./pkg/nodeagent/ -run 'TestConcurrency20|TestHotResumeUnder1s15GiB' -v -count=1 -timeout 30m \
+            | tee /tmp/exit-criteria.log
+          # Guard against a skipped exit-criteria test masquerading as a pass:
+          # both gates MUST actually run and PASS.
+          grep -q '^--- PASS: TestConcurrency20' /tmp/exit-criteria.log \
+            || { echo "::error::TestConcurrency20 did not PASS (skipped?)"; exit 1; }
+          grep -q '^--- PASS: TestHotResumeUnder1s15GiB' /tmp/exit-criteria.log \
+            || { echo "::error::TestHotResumeUnder1s15GiB did not PASS (skipped?)"; exit 1; }
 
       - name: Upload VM logs on failure
         if: failure()
@@ -86,9 +97,9 @@ jobs:
 
       - name: Verify credentials + binaries were provisioned
         run: |
-          test -f /etc/embervm/tokens.json
+          sudo test -f /etc/embervm/tokens.json
           sudo test "$(sudo stat -c '%a' /etc/embervm/tokens.json)" = 600
           test -x bin/embervm
           sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='embervm'" | grep -q 1
-          zpool list embervm
+          sudo zpool list embervm   # /dev/zfs requires root
           echo "install.sh provisioned a node (db + pool + binaries + root-only creds)"
