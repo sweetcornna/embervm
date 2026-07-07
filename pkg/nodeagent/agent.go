@@ -21,8 +21,17 @@ type Config struct {
 	UffdHandlerBin string // cmd/uffd-handler binary (memory server on resume)
 	GuestdBin      string // guestd binary injected into templates
 
-	RestoreMode string // "prefetch" | "lazy" | "file"; default "prefetch"
+	RestoreMode string // "chunked" (M2 pipeline) | "prefetch" | "lazy"; default "prefetch"
 	CgroupRoot  string // cgroup v2 slice parent; default /sys/fs/cgroup/embervm
+
+	// ChunkStoreDir is the node-local chunk cache for RestoreMode=chunked
+	// (default <WorkDir>/chunks). The L1 object store is configured via
+	// EMBERVM_L1_* environment (S3 endpoint or shared directory).
+	ChunkStoreDir string
+	// FCVersion/KernelVersion stamp snapshot manifests (charter: 快照带
+	// (fc_ver, kernel_ver) 标签).
+	FCVersion     string
+	KernelVersion string
 
 	// BootExtraArgs is appended to the guest kernel command line; defaults to
 	// the docs/zh/04 §5 microVM args.

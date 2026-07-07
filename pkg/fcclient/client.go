@@ -42,6 +42,9 @@ func New(socketPath string) *Client {
 type MachineConfig struct {
 	VCPUCount  int `json:"vcpu_count"`
 	MemSizeMiB int `json:"mem_size_mib"`
+	// TrackDirtyPages arms KVM dirty-page logging so pauses can take Diff
+	// snapshots (M2 layered snapshots).
+	TrackDirtyPages bool `json:"track_dirty_pages,omitempty"`
 }
 
 // BootSource is the body of PUT /boot-source.
@@ -79,11 +82,16 @@ type MemBackend struct {
 	BackendPath string `json:"backend_path"`
 }
 
-// SnapshotLoad is the body of PUT /snapshot/load.
+// SnapshotLoad is the body of PUT /snapshot/load. TrackDirtyPages keeps
+// dirty-page tracking armed across restores so the NEXT pause can be a Diff
+// snapshot; ClockRealtime adjusts the guest realtime clock on restore
+// (docs/zh/02 §4 校时).
 type SnapshotLoad struct {
-	SnapshotPath string     `json:"snapshot_path"`
-	MemBackend   MemBackend `json:"mem_backend"`
-	ResumeVM     bool       `json:"resume_vm"`
+	SnapshotPath    string     `json:"snapshot_path"`
+	MemBackend      MemBackend `json:"mem_backend"`
+	ResumeVM        bool       `json:"resume_vm"`
+	TrackDirtyPages bool       `json:"track_dirty_pages,omitempty"`
+	ClockRealtime   bool       `json:"clock_realtime,omitempty"`
 }
 
 func (c *Client) PutMachineConfig(ctx context.Context, m MachineConfig) error {

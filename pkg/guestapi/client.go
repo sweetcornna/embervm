@@ -80,6 +80,16 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	return decodeJSON[HealthResponse](resp)
 }
 
+// Resumed notifies guestd that the VM was just restored from a snapshot
+// (bumps the resumes counter, runs /etc/embervm/resume-hook if present).
+func (c *Client) Resumed(ctx context.Context) (*ResumedResponse, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/resumed", nil, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[ResumedResponse](resp)
+}
+
 // Exec runs a command in the guest and returns its buffered result. A
 // command that starts and fails is a successful Exec (check ExitCode); a
 // command that cannot start is an error.

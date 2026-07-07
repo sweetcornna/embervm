@@ -23,6 +23,15 @@ type HealthResponse struct {
 	Seq     uint64 `json:"seq"`
 	PID     int    `json:"pid"`
 	Version string `json:"version"`
+	// Resumes counts POST /resumed notifications this process has seen —
+	// how many times the sandbox came back from a snapshot restore.
+	Resumes uint64 `json:"resumes"`
+}
+
+// ResumedResponse acknowledges a resume notification.
+type ResumedResponse struct {
+	Resumes uint64 `json:"resumes"`
+	HookRan bool   `json:"hook_ran"`
 }
 
 // ExecRequest runs a command inside the guest.

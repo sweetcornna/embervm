@@ -33,6 +33,15 @@ jobs:
       - name: Unit tests
         run: make test
 
+      # The chunked-restore core is exercised against a real userfaultfd;
+      # prove it ran (a silent SKIP here would be a false green, M1 lesson).
+      - name: uffd chunked-population test must actually run
+        run: |
+          set -o pipefail
+          go test ./pkg/uffd/ -run 'TestPopulateChunk' -v -count=1 | tee /tmp/uffd-chunked.log
+          grep -q -- '--- PASS: TestPopulateChunkRealUffd' /tmp/uffd-chunked.log
+          grep -q -- '--- PASS: TestPopulateChunkRegionStraddle' /tmp/uffd-chunked.log
+
       - name: Template build from registry (network + mkfs.ext4, no KVM)
         run: |
           sudo apt-get install -y e2fsprogs

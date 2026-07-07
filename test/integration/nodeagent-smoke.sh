@@ -52,5 +52,9 @@ export EMBERVM_UFFD_BIN="$BIN_DIR/uffd-handler"
 export EMBERVM_GUESTD_BIN="$BIN_DIR/guestd"
 export EMBERVM_SCRIPT_DIR="$ROOT/scripts"
 
-log "running node agent lifecycle test"
-go test "$ROOT/pkg/nodeagent/" -run TestAgentLifecycleKVM -v -count=1 -timeout 10m
+log "running node agent lifecycle tests (M1 raw + M2 chunked pipeline)"
+go test "$ROOT/pkg/nodeagent/" -run 'TestAgentLifecycleKVM|TestChunkedLifecycleKVM' -v -count=1 -timeout 20m \
+  | tee /tmp/nodeagent-smoke.log
+# A skipped lifecycle test must never masquerade as a pass (M1 CI lesson).
+grep -q -- '--- PASS: TestAgentLifecycleKVM' /tmp/nodeagent-smoke.log
+grep -q -- '--- PASS: TestChunkedLifecycleKVM' /tmp/nodeagent-smoke.log

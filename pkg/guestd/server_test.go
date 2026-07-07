@@ -89,6 +89,40 @@ func TestHealthSeqIncrements(t *testing.T) {
 	}
 }
 
+func postResumed(t *testing.T, srv *httptest.Server) guestapi.ResumedResponse {
+	t.Helper()
+	resp, err := http.Post(srv.URL+"/resumed", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /resumed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /resumed status = %d, want 200", resp.StatusCode)
+	}
+	var ack guestapi.ResumedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatalf("decode resumed ack: %v", err)
+	}
+	return ack
+}
+
+func TestResumedCounter(t *testing.T) {
+	srv := newTestServer(t, Options{})
+	if h := getHealth(t, srv); h.Resumes != 0 {
+		t.Fatalf("fresh server resumes = %d, want 0", h.Resumes)
+	}
+	ack := postResumed(t, srv)
+	if ack.Resumes != 1 || ack.HookRan {
+		t.Fatalf("first resumed ack = %+v, want resumes=1 hook_ran=false", ack)
+	}
+	if ack = postResumed(t, srv); ack.Resumes != 2 {
+		t.Fatalf("second resumed ack = %+v", ack)
+	}
+	if h := getHealth(t, srv); h.Resumes != 2 {
+		t.Fatalf("healthz resumes = %d, want 2", h.Resumes)
+	}
+}
+
 func TestExecStdout(t *testing.T) {
 	srv := newTestServer(t, Options{})
 	status, out, _ := doExec(t, srv, guestapi.ExecRequest{Cmd: "sh", Args: []string{"-c", "printf hi"}})

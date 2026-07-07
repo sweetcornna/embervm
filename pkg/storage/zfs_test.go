@@ -10,9 +10,10 @@ import (
 
 // fakeZFS records every command and answers probes from a scripted state.
 type fakeZFS struct {
-	calls     [][]string
-	existing  map[string]bool // datasets/snapshots that "exist"
-	mountRoot string          // mountpoints returned as <mountRoot>/<ds-tail>
+	calls       [][]string
+	existing    map[string]bool // datasets/snapshots that "exist"
+	mountRoot   string          // mountpoints returned as <mountRoot>/<ds-tail>
+	originValue string          // answer for `zfs get ... origin`
 }
 
 func (f *fakeZFS) run(_ context.Context, name string, args ...string) (string, error) {
@@ -24,6 +25,8 @@ func (f *fakeZFS) run(_ context.Context, name string, args ...string) (string, e
 			return ds, nil
 		}
 		return "dataset does not exist", os.ErrNotExist
+	case name == "zfs" && len(args) >= 2 && args[0] == "get" && args[len(args)-2] == "origin":
+		return f.originValue, nil
 	case name == "zfs" && len(args) >= 2 && args[0] == "get" && args[len(args)-2] == "mountpoint":
 		ds := args[len(args)-1]
 		mp := filepath.Join(f.mountRoot, strings.ReplaceAll(ds, "/", "_"))

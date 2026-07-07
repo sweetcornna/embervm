@@ -142,15 +142,11 @@ func chunkedInputs(manifestDir, storeDir string) (*memsnap.View, uffd.ChunkGette
 		return nil, nil, err
 	}
 	var source chunkstore.Store = local
-	if l1cfg, ok, err := chunkstore.S3FromEnv(); err != nil {
+	if remote, ok, err := chunkstore.L1FromEnv(); err != nil {
 		return nil, nil, err
 	} else if ok {
-		remote, err := chunkstore.NewS3(l1cfg)
-		if err != nil {
-			return nil, nil, err
-		}
 		source = chunkstore.Tiered{Local: local, Remote: remote}
-		log.Printf("L1 fallback enabled: %s/%s", l1cfg.Endpoint, l1cfg.Bucket)
+		log.Printf("L1 fallback enabled")
 	}
 	return view, chunkstore.Bytes{Ctx: context.Background(), S: source}, nil
 }

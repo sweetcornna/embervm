@@ -16,7 +16,7 @@ import (
 // kvmAgent builds a node agent from the asset paths the CI job exports,
 // skipping when the KVM prerequisites or paths are absent. poolSize sizes the
 // netns pool. Returns the agent, the template image to use, and a context.
-func kvmAgent(t *testing.T, poolSize int) (nodeapi.Agent, string) {
+func kvmAgent(t *testing.T, poolSize int, opts ...func(*nodeagent.Config)) (nodeapi.Agent, string) {
 	t.Helper()
 	if os.Getenv("EMBERVM_KVM_TESTS") != "1" {
 		t.Skip("set EMBERVM_KVM_TESTS=1 to run KVM tests")
@@ -51,7 +51,7 @@ func kvmAgent(t *testing.T, poolSize int) (nodeapi.Agent, string) {
 	}
 	t.Cleanup(func() { _ = pool.Teardown(context.Background()) })
 
-	agent, err := nodeagent.New(nodeagent.Config{
+	cfg := nodeagent.Config{
 		Storage:        storage.NewPlainBackend(t.TempDir()),
 		Pool:           pool,
 		WorkDir:        t.TempDir(),
@@ -60,7 +60,11 @@ func kvmAgent(t *testing.T, poolSize int) (nodeapi.Agent, string) {
 		UffdHandlerBin: uffdBin,
 		GuestdBin:      guestdBin,
 		RestoreMode:    "prefetch",
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	agent, err := nodeagent.New(cfg)
 	if err != nil {
 		t.Fatalf("nodeagent.New: %v", err)
 	}

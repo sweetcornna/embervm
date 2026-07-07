@@ -26,6 +26,7 @@ func execRun(ctx context.Context, name string, args ...string) (string, error) {
 type ZFSBackend struct {
 	pool string
 	run  runner
+	srun streamRunner // nil → execStream; injectable for tests
 }
 
 // NewZFSBackend provisions datasets under the given pool.

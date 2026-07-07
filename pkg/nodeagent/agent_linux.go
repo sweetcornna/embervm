@@ -14,9 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/fcclient"
 	"github.com/embervm/embervm/pkg/guestapi"
 	"github.com/embervm/embervm/pkg/lifecycle"
+	"github.com/embervm/embervm/pkg/memsnap"
 	"github.com/embervm/embervm/pkg/netns"
 	"github.com/embervm/embervm/pkg/nodeapi"
 	"github.com/embervm/embervm/pkg/template"
@@ -35,25 +37,31 @@ const baseBootArgs = "console=ttyS0 reboot=k panic=1 pci=off " +
 const defaultExtraArgs = "8250.nr_uarts=0 swiotlb=noforce"
 
 type sandbox struct {
-	id        string
-	machine   *lifecycle.Machine
-	lease     netns.Lease
-	dir       string
-	vcpus     int
-	memMiB    int
-	rootfs    string
-	dataRaw   string
-	fc        *exec.Cmd
-	uffd      *exec.Cmd
-	snapCount int
-	guest     *guestapi.Client
+	id          string
+	machine     *lifecycle.Machine
+	lease       netns.Lease
+	dir         string
+	vcpus       int
+	memMiB      int
+	rootfs      string
+	dataRaw     string
+	fc          *exec.Cmd
+	uffd        *exec.Cmd
+	snapCount   int
+	guest       *guestapi.Client
+	templateID  string
+	dataDiskGiB int
+	mountDir    string              // dataset mountpoint (drive paths live here)
+	layers      []*memsnap.Manifest // chunked snapshot chain, full root first
 }
 
 // Agent is the concrete linux node agent.
 type Agent struct {
-	cfg Config
-	mu  sync.Mutex
-	sbx map[string]*sandbox
+	cfg        Config
+	mu         sync.Mutex
+	sbx        map[string]*sandbox
+	localStore *chunkstore.Dir    // node-local chunk cache (chunked mode)
+	l1         chunkstore.Backend // optional L1 object store (EMBERVM_L1_*)
 }
 
 var _ nodeapi.Agent = (*Agent)(nil)
@@ -79,7 +87,26 @@ func New(cfg Config) (nodeapi.Agent, error) {
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Agent{cfg: cfg, sbx: map[string]*sandbox{}}, nil
+	a := &Agent{cfg: cfg, sbx: map[string]*sandbox{}}
+	if a.chunked() {
+		if cfg.ChunkStoreDir == "" {
+			cfg.ChunkStoreDir = filepath.Join(cfg.WorkDir, "chunks")
+			a.cfg.ChunkStoreDir = cfg.ChunkStoreDir
+		}
+		local, err := chunkstore.NewDir(cfg.ChunkStoreDir)
+		if err != nil {
+			return nil, err
+		}
+		a.localStore = local
+		l1, ok, err := chunkstore.L1FromEnv()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			a.l1 = l1
+		}
+	}
+	return a, nil
 }
 
 // BuildTemplate builds a rootfs from image and imports it as a template.
@@ -93,7 +120,15 @@ func (a *Agent) BuildTemplate(ctx context.Context, templateID, image string) err
 	}); err != nil {
 		return fmt.Errorf("build template %s: %w", templateID, err)
 	}
-	return a.cfg.Storage.EnsureTemplate(ctx, templateID, out)
+	if err := a.cfg.Storage.EnsureTemplate(ctx, templateID, out); err != nil {
+		return err
+	}
+	if a.chunked() {
+		if err := a.pushTemplateL1(ctx, templateID); err != nil {
+			return fmt.Errorf("push template %s to L1: %w", templateID, err)
+		}
+	}
+	return nil
 }
 
 // CreateSandbox clones storage, boots a microVM, and waits for guestd.
@@ -122,14 +157,17 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	}
 
 	sb := &sandbox{
-		id:      req.SandboxID,
-		machine: m,
-		lease:   lease,
-		dir:     filepath.Join(a.cfg.WorkDir, req.SandboxID),
-		vcpus:   req.VCPUs,
-		memMiB:  req.MemoryMiB,
-		rootfs:  paths.RootfsExt4,
-		dataRaw: paths.DataRaw,
+		id:          req.SandboxID,
+		machine:     m,
+		lease:       lease,
+		dir:         filepath.Join(a.cfg.WorkDir, req.SandboxID),
+		vcpus:       req.VCPUs,
+		memMiB:      req.MemoryMiB,
+		rootfs:      paths.RootfsExt4,
+		dataRaw:     paths.DataRaw,
+		templateID:  req.TemplateID,
+		dataDiskGiB: req.DataDiskGiB,
+		mountDir:    paths.Dir,
 	}
 	if err := os.MkdirAll(sb.dir, 0o755); err != nil {
 		a.cleanup(ctx, sb)
@@ -175,7 +213,10 @@ func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
 	bootArgs := baseBootArgs + " " + a.cfg.BootExtraArgs
 	steps := []func() error{
 		func() error {
-			return c.PutMachineConfig(ctx, fcclient.MachineConfig{VCPUCount: sb.vcpus, MemSizeMiB: sb.memMiB})
+			return c.PutMachineConfig(ctx, fcclient.MachineConfig{
+				VCPUCount: sb.vcpus, MemSizeMiB: sb.memMiB,
+				TrackDirtyPages: a.chunked(), // Diff snapshots need dirty logging
+			})
 		},
 		func() error {
 			return c.PutBootSource(ctx, fcclient.BootSource{KernelImagePath: a.cfg.KernelPath, BootArgs: bootArgs})
@@ -214,6 +255,12 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 	if err := c.PatchVMState(ctx, "Paused"); err != nil {
 		return err
 	}
+	if a.chunked() {
+		if err := a.pauseChunked(ctx, sb); err != nil {
+			return err
+		}
+		return sb.machine.To(lifecycle.StatePausedHot)
+	}
 	snapDir := filepath.Join(sb.dir, "snap")
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		return err
@@ -246,10 +293,21 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 	_ = os.Remove(uffdSock)
 
 	// Start the memory handler (listens on uffdSock) before FC connects.
-	uffd := exec.Command(a.cfg.UffdHandlerBin,
-		"--socket", uffdSock,
-		"--memfile", filepath.Join(snapDir, "memfile"),
-		"--mode", a.cfg.RestoreMode)
+	var uffd *exec.Cmd
+	if a.chunked() {
+		uffd = exec.Command(a.cfg.UffdHandlerBin,
+			"--socket", uffdSock,
+			"--mode", "chunked",
+			"--manifest-dir", snapDir,
+			"--store", a.cfg.ChunkStoreDir,
+			"--ws", sb.wsPath(),
+			"--parent-pid", strconv.Itoa(os.Getpid()))
+	} else {
+		uffd = exec.Command(a.cfg.UffdHandlerBin,
+			"--socket", uffdSock,
+			"--memfile", filepath.Join(snapDir, "memfile"),
+			"--mode", a.cfg.RestoreMode)
+	}
 	ulog, _ := os.Create(filepath.Join(sb.dir, "uffd.log"))
 	if ulog != nil {
 		uffd.Stdout, uffd.Stderr = ulog, ulog
@@ -279,11 +337,17 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 	}
 
 	c := fcclient.New(apiSock)
-	if err := c.LoadSnapshot(ctx, fcclient.SnapshotLoad{
+	load := fcclient.SnapshotLoad{
 		SnapshotPath: filepath.Join(snapDir, "snapfile"),
 		MemBackend:   fcclient.MemBackend{BackendType: "Uffd", BackendPath: uffdSock},
 		ResumeVM:     true,
-	}); err != nil {
+	}
+	if a.chunked() {
+		load.SnapshotPath = sb.snapfile(sb.layerID(sb.snapCount))
+		load.TrackDirtyPages = true // keep Diff pauses possible after restore
+		load.ClockRealtime = true   // 校时: re-arm the guest realtime clock
+	}
+	if err := c.LoadSnapshot(ctx, load); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
 	if err := sb.machine.To(lifecycle.StateRunning); err != nil {
@@ -292,6 +356,11 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 	if err := a.waitGuest(ctx, sb, 15*time.Second); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("guestd unreachable after resume: %w", err)
 	}
+	// Notify the guest (resume counter, /etc/embervm/resume-hook). Old
+	// guestd builds without the endpoint make this a no-op.
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	_, _ = sb.guest.Resumed(rctx)
+	cancel()
 	return a.statusLocked(sb), nil
 }
 
@@ -371,6 +440,11 @@ func (a *Agent) WriteFile(ctx context.Context, sandboxID, path string, mode fs.F
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// WorkDirOf returns a sandbox's runtime directory (tests and debugging).
+func (a *Agent) WorkDirOf(sandboxID string) string {
+	return filepath.Join(a.cfg.WorkDir, sandboxID)
+}
 
 func (a *Agent) get(id string) (*sandbox, error) {
 	a.mu.Lock()

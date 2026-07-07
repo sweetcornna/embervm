@@ -19,7 +19,11 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	"context"
+	"fmt"
 	"github.com/embervm/embervm/pkg/guestapi"
+	"os/exec"
+	"time"
 )
 
 // defaultMaxOutputBytes caps each exec output stream (stdout, stderr).
@@ -35,6 +39,7 @@ type server struct {
 	version   string
 	maxOutput int64
 	seq       atomic.Uint64
+	resumes   atomic.Uint64
 }
 
 // NewServer returns the guestd HTTP handler.
@@ -45,6 +50,7 @@ func NewServer(opts Options) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("POST /resumed", s.handleResumed)
 	mux.HandleFunc("POST /exec", s.handleExec)
 	mux.HandleFunc("GET /files", s.handleReadFile)
 	mux.HandleFunc("PUT /files", s.handleWriteFile)
@@ -67,7 +73,32 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Seq:     s.seq.Add(1),
 		PID:     os.Getpid(),
 		Version: s.version,
+		Resumes: s.resumes.Load(),
 	})
+}
+
+// resumeHookPath is executed (best-effort) on every resume notification:
+// token refresh, cache invalidation — whatever the image needs after a
+// pause/restore gap (docs/zh/03 §3 M2 correctness hooks).
+const resumeHookPath = "/etc/embervm/resume-hook"
+
+// handleResumed is called by the node agent after a snapshot restore. The
+// kernel already re-armed kvm-clock and reseeded the RNG via VMGenID; this
+// hook exists for userspace concerns.
+func (s *server) handleResumed(w http.ResponseWriter, r *http.Request) {
+	n := s.resumes.Add(1)
+	hookRan := false
+	if st, err := os.Stat(resumeHookPath); err == nil && st.Mode()&0o111 != 0 {
+		hookRan = true
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if out, err := exec.CommandContext(ctx, resumeHookPath).CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "guestd: resume-hook: %v: %s\n", err, out)
+			}
+		}()
+	}
+	writeJSON(w, http.StatusOK, guestapi.ResumedResponse{Resumes: n, HookRan: hookRan})
 }
 
 // absPathParam extracts and validates the required ?path= query parameter.
