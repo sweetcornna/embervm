@@ -94,6 +94,19 @@ if ! ensure_zfs; then
   exit 0
 fi
 
+# A loadable module does not imply the userland tools: ubuntu-24.04 runners
+# ship the zfs kernel module but not zfsutils-linux (zpool/zfs commands).
+if ! command -v zpool >/dev/null 2>&1 || ! command -v zfs >/dev/null 2>&1; then
+  log "zfs: module ok but zpool/zfs userland missing; installing zfsutils-linux"
+  if ! apt-get install -y zfsutils-linux >&2 \
+      || ! command -v zpool >/dev/null 2>&1 || ! command -v zfs >/dev/null 2>&1; then
+    log "zpool/zfs userland unavailable -- writing skip marker to $OUT (exit 0, non-blocking)"
+    printf '{"skipped":true,"reason":"zfsutils-linux userland unavailable on runner"}\n' > "$OUT"
+    cat "$OUT"
+    exit 0
+  fi
+fi
+
 # --- 2. Tool requirements ----------------------------------------------------
 command -v fio >/dev/null 2>&1 || { log "installing fio"; apt-get install -y fio >&2; }
 command -v jq >/dev/null 2>&1 || { log "installing jq"; apt-get install -y jq >&2; }
