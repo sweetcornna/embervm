@@ -1,0 +1,103 @@
+package chunkstore
+
+import (
+	"context"
+	"fmt"
+	"io"
+
+	"golang.org/x/sync/errgroup"
+)
+
+// DefaultParallel bounds concurrent chunk transfers (并行上传下载,
+// docs/zh/03 §3 M2).
+const DefaultParallel = 16
+
+// Copier moves chunks between stores (write-through to L1 on pause,
+// backfill from L1 on restore).
+type Copier struct {
+	Src      Store
+	Dst      Store
+	Parallel int // <= 0 means DefaultParallel
+}
+
+// Copy transfers the given chunks, skipping ones Dst already has.
+// It returns how many chunks were actually written (the rest were dedup
+// hits) and fails fast on the first error.
+func (c Copier) Copy(ctx context.Context, hashes []string) (int, error) {
+	par := c.Parallel
+	if par <= 0 {
+		par = DefaultParallel
+	}
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(par)
+	copied := make(chan int, len(hashes))
+	for _, hash := range hashes {
+		g.Go(func() error {
+			ok, err := c.Dst.Has(ctx, hash)
+			if err != nil {
+				return err
+			}
+			if ok {
+				return nil
+			}
+			rc, err := c.Src.Get(ctx, hash)
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+			// Size -1: Dir streams any length; S3 falls back to a
+			// multipart-capable upload for unknown sizes.
+			written, err := c.Dst.Put(ctx, hash, rc, sizeOf(rc))
+			if err != nil {
+				return fmt.Errorf("copy chunk %s: %w", hash, err)
+			}
+			if written {
+				copied <- 1
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return 0, err
+	}
+	close(copied)
+	n := 0
+	for range copied {
+		n++
+	}
+	return n, nil
+}
+
+// Missing returns the subset of hashes the store does not have, preserving
+// order (restore uses it to plan WS-first backfill).
+func Missing(ctx context.Context, s Store, hashes []string) ([]string, error) {
+	var out []string
+	for _, h := range hashes {
+		ok, err := s.Has(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+// sizeOf recovers the exact size from seekable readers (both backends
+// return them: *os.File and *minio.Object); otherwise -1, which Put
+// handles with a streaming upload.
+func sizeOf(r io.Reader) int64 {
+	s, ok := r.(io.Seeker)
+	if !ok {
+		return -1
+	}
+	end, err := s.Seek(0, io.SeekEnd)
+	if err != nil {
+		return -1
+	}
+	if _, err := s.Seek(0, io.SeekStart); err != nil {
+		return -1
+	}
+	return end
+}
