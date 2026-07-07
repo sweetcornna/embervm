@@ -37,3 +37,28 @@ jobs:
         run: |
           sudo apt-get install -y e2fsprogs
           EMBERVM_NET_TESTS=1 go test ./pkg/template/ -run 'TestBuildFromRegistry|TestBuildFromTar|TestMkext4' -v
+
+  storage-zfs:
+    # Real-ZFS clone/snapshot check on a throwaway loop-file pool. The zfs
+    # kernel module ships in the ubuntu-latest kernel but zfsutils-linux does
+    # not (M0 lesson); non-blocking because a runner without either must not
+    # gate the build.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install zfs userland
+        run: sudo apt-get update && sudo apt-get install -y zfsutils-linux
+
+      - name: Load zfs module
+        run: sudo modprobe zfs
+
+      - name: Real-ZFS integration test
+        run: sudo -E env "PATH=$PATH" EMBERVM_ZFS_TESTS=1 go test ./pkg/storage/ -run TestZFSIntegration -v
