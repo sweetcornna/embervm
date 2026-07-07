@@ -8,12 +8,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/embervm/embervm/pkg/controlplane"
 	"github.com/embervm/embervm/pkg/nodeapi"
@@ -56,18 +54,9 @@ func main() {
 // no file is given (dev convenience; log a warning).
 func loadTokens(path string) (*controlplane.TokenStore, error) {
 	if path == "" {
-		log.Println("apiserver: WARNING no --tokens-file; using dev token 'dev-token' (owner dev, max 100)")
-		return controlplane.NewTokenStore(map[string]controlplane.TokenInfo{
-			"dev-token": {Owner: "dev", MaxSandboxes: 100},
-		}), nil
+		log.Printf("apiserver: WARNING no --tokens-file; using dev token %q (owner dev, max 100)",
+			controlplane.DevTokenName)
+		return controlplane.DevTokenStore(), nil
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]controlplane.TokenInfo
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("parse tokens file: %w", err)
-	}
-	return controlplane.NewTokenStore(m), nil
+	return controlplane.LoadTokensFromFile(path)
 }

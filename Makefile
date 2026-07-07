@@ -17,9 +17,10 @@ build:
 	GOOS=$(GOOS_TARGET) CGO_ENABLED=0 $(GO) build -o $(BIN_DIR)/apiserver ./cmd/apiserver
 	GOOS=$(GOOS_TARGET) CGO_ENABLED=0 $(GO) build -o $(BIN_DIR)/nodeagent ./cmd/nodeagent
 	GOOS=$(GOOS_TARGET) CGO_ENABLED=0 $(GO) build -o $(BIN_DIR)/guestd ./cmd/guestd
+	GOOS=$(GOOS_TARGET) CGO_ENABLED=0 $(GO) build -o $(BIN_DIR)/embervm ./cmd/embervm
 
 lint: fmt vet
-	shellcheck scripts/*.sh test/integration/*.sh test/bench/*.sh
+	shellcheck scripts/*.sh test/integration/*.sh test/bench/*.sh deploy/singlenode/*.sh
 
 fmt:
 	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi

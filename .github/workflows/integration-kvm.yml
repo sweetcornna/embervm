@@ -124,3 +124,56 @@ jobs:
             /tmp/**/fc*.log
             /tmp/**/uffd*.log
           if-no-files-found: ignore
+
+  dev-smoke:
+    # Full public REST lifecycle through `embervm dev` (single process +
+    # in-proc node agent) against a real PostgreSQL and a real microVM.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: embervm
+          POSTGRES_PASSWORD: embervm
+          POSTGRES_DB: embervm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle || true
+          for _ in $(seq 1 30); do test -w /dev/kvm && break; sleep 1; done
+          test -w /dev/kvm
+
+      - name: Enable unprivileged userfaultfd
+        run: sudo sysctl -w vm.unprivileged_userfaultfd=1
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq e2fsprogs
+
+      - name: Cache assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-v1.16.1-${{ hashFiles('scripts/assets.sha256') }}
+
+      - name: Run dev-mode REST smoke
+        env:
+          EMBERVM_DATABASE_URL: postgres://embervm:embervm@localhost:5432/embervm?sslmode=disable
+        run: sudo -E env "PATH=$PATH" FC_VERSION=v1.16.1 bash test/integration/dev-smoke.sh
