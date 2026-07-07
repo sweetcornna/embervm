@@ -15,6 +15,8 @@ design reference that EmberVM uses, per the code-reuse compliance policy in
 | 3 | Firecracker CI guest assets: Ubuntu 24.04 squashfs rootfs | firecracker-microvm CI artifacts | Various (Ubuntu component licenses) | Downloaded as a test fixture (guest root filesystem) for local/CI microVM tests only | No |
 | 4 | golang.org/x/sys | [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) | BSD-3-Clause | Go module dependency (syscall wrappers: userfaultfd ioctls, etc.); statically linked into EmberVM binaries | Yes (in compiled binaries) |
 | 5 | Contributor Covenant v2.1 | [contributor-covenant.org](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html) | CC BY 4.0 | Adapted as [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), with attribution | Yes (in this repository) |
+| 6 | google/go-containerregistry | [google/go-containerregistry](https://github.com/google/go-containerregistry) | Apache-2.0 | Go module dependency; daemonless pull + flatten of Docker/OCI images in `pkg/template` (the template builder); statically linked into EmberVM binaries | Yes (in compiled binaries) |
+| 7 | cyphar/filepath-securejoin | [cyphar/filepath-securejoin](https://github.com/cyphar/filepath-securejoin) | BSD-3-Clause | Go module dependency; scoped symlink resolution that keeps tar extraction (`pkg/template`) inside the destination root (tar-slip defense); statically linked into EmberVM binaries | Yes (in compiled binaries) |
 
 ## Entry details
 
@@ -58,6 +60,25 @@ design reference that EmberVM uses, per the code-reuse compliance policy in
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) is adapted from the Contributor
   Covenant, version 2.1, by Coraline Ada Ehmke and contributors, licensed
   CC BY 4.0. Attribution is included in the document itself as required.
+
+### 6. google/go-containerregistry (Apache-2.0)
+
+- The template builder (`pkg/template`) uses go-containerregistry's `crane`
+  and `mutate` packages to pull a Docker/OCI image and flatten its layers
+  into a single filesystem tar **without a Docker daemon** — production
+  EmberVM nodes do not run one. Apache-2.0 is one-way compatible with
+  AGPL-3.0; the library is a normal Go dependency, statically linked, with
+  its license and copyright shipped in the module source.
+
+### 7. cyphar/filepath-securejoin (BSD-3-Clause)
+
+- `pkg/template`'s tar extractor resolves every on-disk write path with
+  `securejoin.SecureJoin`, which follows symlinks already present in the
+  staging tree but clamps any component that would escape the destination
+  back inside it. This is the tar-slip / Zip-Slip defense: a hostile image
+  layer cannot place a `foo -> /etc` symlink and then write through it to the
+  host. The library is the same audited implementation used by runc and
+  containerd. BSD-3-Clause is compatible with AGPL-3.0.
 
 ## How to add an entry
 

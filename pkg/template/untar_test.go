@@ -121,9 +121,6 @@ func TestUntarRejectsEscapes(t *testing.T) {
 		{"absolute name", []tarEntry{
 			{name: "/abs/escape", typeflag: tar.TypeReg, mode: 0o644, body: "x"},
 		}},
-		{"dotdot hardlink target", []tarEntry{
-			{name: "f", typeflag: tar.TypeLink, mode: 0o644, linkname: "../../etc/passwd"},
-		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,6 +129,65 @@ func TestUntarRejectsEscapes(t *testing.T) {
 				t.Errorf("Untar accepted escaping entry, want error")
 			}
 		})
+	}
+}
+
+// TestUntarSymlinkTraversalContained is the regression test for the
+// tar-slip finding: a symlink whose target escapes dst, followed by a write
+// "through" it, must land inside dst — never on the host path.
+func TestUntarSymlinkTraversalContained(t *testing.T) {
+	cases := []struct {
+		name   string
+		linkTo func(outside string) string
+	}{
+		{"absolute escaping symlink", func(outside string) string { return outside }},
+		{"dotdot escaping symlink", func(string) string { return "../../../../../../../../tmp" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := t.TempDir()
+			outside := t.TempDir() // a sibling that must stay untouched
+			sentinel := filepath.Join(outside, "passwd")
+
+			entries := []tarEntry{
+				{name: "bin", typeflag: tar.TypeSymlink, mode: 0o777, linkname: tc.linkTo(outside)},
+				{name: "bin/passwd", typeflag: tar.TypeReg, mode: 0o644, body: "pwned"},
+			}
+			// Must not error, and must not escape.
+			if err := Untar(dst, buildTar(t, entries)); err != nil {
+				t.Fatalf("Untar: %v", err)
+			}
+			if _, err := os.Stat(sentinel); err == nil {
+				t.Fatalf("write escaped to %s", sentinel)
+			}
+			// The byte payload stayed under dst (clamped through the symlink).
+			var found bool
+			_ = filepath.WalkDir(dst, func(p string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					if b, _ := os.ReadFile(p); string(b) == "pwned" {
+						found = true
+					}
+				}
+				return nil
+			})
+			if !found {
+				t.Errorf("payload not found anywhere under dst; extraction lost it")
+			}
+		})
+	}
+}
+
+// TestUntarHardlinkTargetContained ensures a hardlink cannot point at a host
+// file outside dst.
+func TestUntarHardlinkTargetContained(t *testing.T) {
+	dst := t.TempDir()
+	entries := []tarEntry{
+		{name: "f", typeflag: tar.TypeLink, mode: 0o644, linkname: "../../etc/passwd"},
+	}
+	// SecureJoin clamps the source to dst/etc/passwd, which does not exist,
+	// so os.Link fails — the important part is no host file is linked.
+	if err := Untar(dst, buildTar(t, entries)); err == nil {
+		t.Errorf("Untar linked a nonexistent clamped source without error")
 	}
 }
 

@@ -32,3 +32,8 @@ jobs:
 
       - name: Unit tests
         run: make test
+
+      - name: Template build from registry (network + mkfs.ext4, no KVM)
+        run: |
+          sudo apt-get install -y e2fsprogs
+          EMBERVM_NET_TESTS=1 go test ./pkg/template/ -run 'TestBuildFromRegistry|TestBuildFromTar|TestMkext4' -v

@@ -11,15 +11,44 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+
+	securejoin "github.com/cyphar/filepath-securejoin"
 )
+
+// safeTarget resolves the on-disk path for a tar entry name, scoped to dst.
+// The PARENT directory chain is resolved with SecureJoin (following existing
+// symlinks but clamping any escape back inside dst); the final component is
+// kept literal so an entry replaces whatever sits at that exact path instead
+// of being written through a pre-existing symlink there. A malicious
+// "bin -> /etc" parent is thus clamped to dst/etc, while re-extracting a
+// symlink entry replaces it in place rather than following it.
+func safeTarget(dst, name string) (string, error) {
+	clean := path.Clean("/" + name) // collapses .. and leading slashes, always rooted
+	dir, base := path.Split(clean)  // dir keeps a trailing slash; base is the literal leaf
+	parent, err := securejoin.SecureJoin(dst, dir)
+	if err != nil {
+		return "", err
+	}
+	if base == "" { // directory entry like "bin/" → clean "/bin", base "bin"; only "/" hits this
+		return parent, nil
+	}
+	return filepath.Join(parent, base), nil
+}
 
 // Untar extracts a flattened filesystem tar into dst. It handles dirs,
 // regular files, symlinks and hardlinks; preserves modes; applies uid/gid
 // and device nodes only when running as root (unprivileged extraction skips
-// them). Entry names and hardlink targets must stay inside dst; symlink
-// TARGETS may be absolute or dot-dotted — they are guest paths, resolved at
-// guest runtime, never during extraction.
+// them).
+//
+// Extraction is hardened against tar-slip: every on-disk path is resolved
+// with securejoin.SecureJoin, which follows symlinks already present in the
+// tree but clamps any component that would escape dst back inside it. A
+// malicious "bin -> /etc" symlink followed by a "bin/passwd" file therefore
+// writes dst/etc/passwd, never the host's /etc/passwd. Symlink and hardlink
+// TARGET strings are written verbatim (they are guest paths); only the
+// resolution used to place bytes on the host is constrained.
 func Untar(dst string, r io.Reader) error {
 	tr := tar.NewReader(r)
 	// Directory modes are applied after extraction: a read-only dir created
@@ -39,11 +68,15 @@ func Untar(dst string, r io.Reader) error {
 			return fmt.Errorf("read tar: %w", err)
 		}
 
-		name := filepath.FromSlash(hdr.Name)
-		if !filepath.IsLocal(name) {
+		// Reject obviously-hostile entry names early for a clear error;
+		// SecureJoin below is the actual containment guarantee.
+		if name := filepath.FromSlash(hdr.Name); name != "" && !filepath.IsLocal(name) {
 			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
 		}
-		target := filepath.Join(dst, name)
+		target, err := safeTarget(dst, hdr.Name)
+		if err != nil {
+			return fmt.Errorf("resolve %q: %w", hdr.Name, err)
+		}
 		mode := hdr.FileInfo().Mode()
 
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -72,14 +105,16 @@ func Untar(dst string, r io.Reader) error {
 			}
 
 		case tar.TypeLink:
-			linkSrc := filepath.FromSlash(hdr.Linkname)
-			if !filepath.IsLocal(linkSrc) {
-				return fmt.Errorf("hardlink target escapes root: %q -> %q", hdr.Name, hdr.Linkname)
+			// The hardlink source is resolved scoped to dst as well, so it
+			// can never point at a host file outside the extraction root.
+			linkSrc, err := safeTarget(dst, hdr.Linkname)
+			if err != nil {
+				return fmt.Errorf("resolve hardlink target %q: %w", hdr.Linkname, err)
 			}
 			if err := removeIfExists(target); err != nil {
 				return fmt.Errorf("replace %q: %w", hdr.Name, err)
 			}
-			if err := os.Link(filepath.Join(dst, linkSrc), target); err != nil {
+			if err := os.Link(linkSrc, target); err != nil {
 				return fmt.Errorf("hardlink %q: %w", hdr.Name, err)
 			}
 
