@@ -11,22 +11,29 @@ import (
 
 // placeCgroup best-effort creates a cgroup v2 slice for the sandbox, sets a
 // memory ceiling (guest memory plus a modest VMM overhead), and moves the
-// Firecracker pid into it. Failures are logged and ignored: strict cgroup
-// enforcement is part of the M4 host-hardening pass, and M1 must keep
-// booting on runners where controllers are not delegated.
+// Firecracker pid into it. Failures are ignored: strict cgroup enforcement
+// is part of the M4 host-hardening pass, and M1 must keep booting on runners
+// where controllers are not delegated (memory.max needs the memory
+// controller enabled in the parent's subtree_control, which some CI hosts
+// disallow).
 func (a *Agent) placeCgroup(sandboxID string, pid, memMiB int) {
+	if err := os.MkdirAll(a.cfg.CgroupRoot, 0o755); err != nil {
+		return
+	}
+	// Delegate the memory controller to our subtree so memory.max works in
+	// the per-sandbox slice; ignore failure (best-effort).
+	_ = os.WriteFile(filepath.Join(a.cfg.CgroupRoot, "cgroup.subtree_control"), []byte("+memory"), 0o644)
+
 	dir := filepath.Join(a.cfg.CgroupRoot, sandboxID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "nodeagent: cgroup mkdir %s: %v\n", dir, err)
 		return
 	}
 	// +256 MiB headroom for the VMM and page cache.
 	limit := int64(memMiB+256) << 20
-	if err := os.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(limit, 10)), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "nodeagent: cgroup memory.max: %v\n", err)
-	}
+	_ = os.WriteFile(filepath.Join(dir, "memory.max"), []byte(strconv.FormatInt(limit, 10)), 0o644)
+	// Placing the pid is the part that matters for M1; keep its error visible.
 	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "nodeagent: cgroup.procs: %v\n", err)
+		fmt.Fprintf(os.Stderr, "nodeagent: cgroup place pid %d: %v\n", pid, err)
 	}
 }
 

@@ -84,12 +84,8 @@ func TestAgentLifecycleKVM(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = agent.StopSandbox(context.Background(), "s1") })
 
-	h1, err := agent.Health(ctx, "s1")
-	if err != nil {
+	if _, err := agent.Health(ctx, "s1"); err != nil {
 		t.Fatalf("Health after create: %v", err)
-	}
-	if h1.Seq != 1 {
-		t.Errorf("first health seq = %d, want 1", h1.Seq)
 	}
 
 	ex, err := agent.Exec(ctx, "s1", &guestapi.ExecRequest{Cmd: "echo", Args: []string{"hello"}})
@@ -111,7 +107,14 @@ func TestAgentLifecycleKVM(t *testing.T) {
 		t.Errorf("read = %q, want payload", data)
 	}
 
-	// Pause → resume; the same guest process must survive (seq 1 → 2).
+	// Baseline the per-process health counter right before pausing. Only
+	// successful probes increment it, so a genuine restore of the SAME
+	// process keeps climbing, whereas a guest reboot would reset it low.
+	hBefore, err := agent.Health(ctx, "s1")
+	if err != nil {
+		t.Fatalf("Health before pause: %v", err)
+	}
+
 	pauseStart := time.Now()
 	if err := agent.PauseSandbox(ctx, "s1"); err != nil {
 		t.Fatalf("PauseSandbox: %v", err)
@@ -121,12 +124,16 @@ func TestAgentLifecycleKVM(t *testing.T) {
 	}
 	t.Logf("pause+resume round trip: %v", time.Since(pauseStart))
 
-	h2, err := agent.Health(ctx, "s1")
+	hAfter, err := agent.Health(ctx, "s1")
 	if err != nil {
 		t.Fatalf("Health after resume: %v", err)
 	}
-	if h2.Seq != 2 {
-		t.Errorf("post-resume health seq = %d, want 2 (same process must survive restore)", h2.Seq)
+	// Monotonic across the restore => the same guestd process survived.
+	// (ResumeSandbox's readiness probe also increments, so After is at least
+	// Before+2; a reboot would have reset the counter below Before.)
+	if hAfter.Seq <= hBefore.Seq {
+		t.Errorf("health seq %d -> %d across restore: not monotonic, guest process did NOT survive (reset on reboot?)",
+			hBefore.Seq, hAfter.Seq)
 	}
 
 	if err := agent.StopSandbox(ctx, "s1"); err != nil {
