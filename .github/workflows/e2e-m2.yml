@@ -1,0 +1,112 @@
+name: e2e-m2
+
+# M2 exit-criteria gate (docs/zh/03 §3): pause→上传→异机 resume 全链路;
+# 热恢复 P50 < 500ms; 温恢复 P99 < 3s. Latencies are CI-relative per
+# docs/adr/0001 (nested virtualization); bare-metal re-measurement remains a
+# tracked follow-up.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  exit-criteria:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FC_VERSION: v1.16.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle || true
+          for _ in $(seq 1 30); do test -w /dev/kvm && break; sleep 1; done
+          test -w /dev/kvm
+
+      - name: Enable unprivileged userfaultfd
+        run: sudo sysctl -w vm.unprivileged_userfaultfd=1
+
+      - name: Install dependencies (zfs userland is NOT preinstalled)
+        run: sudo apt-get update && sudo apt-get install -y jq e2fsprogs zfsutils-linux
+
+      - name: Free runner disk space
+        run: bash scripts/ci-free-disk.sh
+
+      - name: Create loopback ZFS pool
+        run: |
+          truncate -s 12G /var/tmp/embervm-m2.img
+          sudo zpool create -f embervm-m2 /var/tmp/embervm-m2.img
+          sudo zfs list embervm-m2
+
+      - name: Start MinIO (L1 object store)
+        run: |
+          curl -fsSL -o /usr/local/bin/minio.tmp https://dl.min.io/server/minio/release/linux-amd64/minio
+          sudo install -m 0755 /usr/local/bin/minio.tmp /usr/local/bin/minio
+          curl -fsSL -o /usr/local/bin/mc.tmp https://dl.min.io/client/mc/release/linux-amd64/mc
+          sudo install -m 0755 /usr/local/bin/mc.tmp /usr/local/bin/mc
+          mkdir -p /tmp/minio-data
+          MINIO_ROOT_USER=embervm-ci MINIO_ROOT_PASSWORD=embervm-ci-secret \
+            nohup minio server /tmp/minio-data --address 127.0.0.1:9000 >/tmp/minio.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+          curl -sf http://127.0.0.1:9000/minio/health/live
+          mc alias set l1 http://127.0.0.1:9000 embervm-ci embervm-ci-secret
+          mc mb l1/embervm
+
+      - name: Cache assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-v1.16.1-${{ hashFiles('scripts/assets.sha256') }}
+
+      - name: Build host binaries
+        run: make build
+
+      - name: Fetch assets
+        run: sudo -E env "PATH=$PATH" FC_VERSION=v1.16.1 bash scripts/fetch-assets.sh
+
+      - name: Run M2 exit-criteria tests (hot P50 / warm P99 / cross-node / diff chain)
+        env:
+          # Absolute paths (M1 lesson: relative paths make env-gated tests
+          # silently SKIP — a false green).
+          EMBERVM_KVM_TESTS: "1"
+          EMBERVM_KERNEL: ${{ github.workspace }}/assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: ${{ github.workspace }}/bin/uffd-handler
+          EMBERVM_GUESTD_BIN: ${{ github.workspace }}/bin/guestd
+          EMBERVM_SCRIPT_DIR: ${{ github.workspace }}/scripts
+          EMBERVM_ZFS_POOL: embervm-m2
+          EMBERVM_L1_ENDPOINT: 127.0.0.1:9000
+          EMBERVM_L1_BUCKET: embervm
+          EMBERVM_L1_ACCESS_KEY: embervm-ci
+          EMBERVM_L1_SECRET_KEY: embervm-ci-secret
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" \
+            go test ./pkg/nodeagent/ \
+            -run 'TestHotRestoreP50|TestWarmRestoreP99|TestCrossNodeRestore|TestDiffChain|TestDedupReport' \
+            -v -count=1 -timeout 40m \
+            | tee /tmp/m2-exit.log
+          # Every gate MUST actually run and PASS (skips are false greens).
+          for t in TestHotRestoreP50 TestWarmRestoreP99 TestCrossNodeRestore TestDiffChain TestDedupReport; do
+            grep -q -- "--- PASS: $t" /tmp/m2-exit.log \
+              || { echo "::error::$t did not PASS (skipped?)"; exit 1; }
+          done
+
+      - name: Report measured numbers
+        if: always()
+        run: |
+          grep -E "hot restore over|warm restore over|cross-node restore|dedup report|layer p[0-9]" /tmp/m2-exit.log || true
+
+      - name: Upload logs on failure
+        if: failure()
+        run: sudo chmod -R a+rX /tmp 2>/dev/null || true
