@@ -40,8 +40,8 @@ type ChunkRef struct {
 	Index int    `json:"i"`
 	Hash  string `json:"h,omitempty"` // sha256 hex of the UNCOMPRESSED bytes; empty for zero chunks
 	Zero  bool   `json:"z,omitempty"`
-	Codec string `json:"c,omitempty"` // "lz4" | "raw"; empty for zero chunks
-	ULen  int    `json:"ul"`          // uncompressed length (== chunk size except the last chunk)
+	Codec string `json:"c,omitempty"`  // "lz4" | "raw"; empty for zero chunks
+	ULen  int    `json:"ul"`           // uncompressed length (== chunk size except the last chunk)
 	CLen  int    `json:"cl,omitempty"` // stored length (== ULen when raw, 0 when zero)
 }
 
