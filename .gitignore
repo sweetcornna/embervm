@@ -1,0 +1,19 @@
+# build outputs
+/bin/
+/work/
+/results/
+/assets/
+
+# large VM artifacts anywhere
+*.ext4
+*.squashfs
+*.snap
+memfile
+snapfile
+vmlinux*
+
+# editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
