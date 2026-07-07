@@ -63,6 +63,11 @@ func TestReceiveTemplateIdempotent(t *testing.T) {
 	if err := b.ReceiveTemplate(context.Background(), "tmpl2", strings.NewReader("DATA")); err != nil {
 		t.Fatal(err)
 	}
+	// The templates/ container must be created first: zfs receive does not
+	// create ancestors, and a receiving node may never have built one.
+	if !fz.findCall("zfs", "create", "-p", "embervm/n1/templates") {
+		t.Fatalf("missing ancestor create before receive: %v", fz.calls)
+	}
 	want := []string{"zfs", "receive", "embervm/n1/templates/tmpl2"}
 	if !reflect.DeepEqual(fs.calls[0], want) {
 		t.Fatalf("calls[0] = %v, want %v", fs.calls[0], want)

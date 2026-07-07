@@ -80,6 +80,13 @@ func (b *ZFSBackend) ReceiveTemplate(ctx context.Context, templateID string, r i
 	if b.datasetExists(ctx, ds+"@final") {
 		return nil
 	}
+	// zfs receive does not create ancestors; a node that never built a
+	// template has no templates/ container yet.
+	if parent := b.pool + "/templates"; !b.datasetExists(ctx, parent) {
+		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
+			return err
+		}
+	}
 	return b.stream(ctx, r, nil, "receive", ds)
 }
 
