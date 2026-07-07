@@ -100,6 +100,14 @@ func (b *ZFSBackend) CloneSandbox(ctx context.Context, sandboxID, templateID str
 	if err := validateID("template", templateID); err != nil {
 		return SandboxPaths{}, err
 	}
+	// zfs clone does not create parent datasets, so the sandboxes container
+	// must exist first (create -p errors if the leaf already exists, hence
+	// the existence probe).
+	if parent := b.pool + "/sandboxes"; !b.datasetExists(ctx, parent) {
+		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
+			return SandboxPaths{}, err
+		}
+	}
 	sds := b.sandboxDS(sandboxID)
 	if _, err := b.run(ctx, "zfs", "clone", b.templateDS(templateID)+"@final", sds); err != nil {
 		return SandboxPaths{}, err

@@ -116,6 +116,12 @@ func TestZFSCloneSandbox(t *testing.T) {
 	if !f.findCall("zfs", "clone", "embervm/templates/tpl1@final", "embervm/sandboxes/sbx1") {
 		t.Errorf("no clone from @final; calls=%v", f.calls)
 	}
+	// The sandboxes container dataset must be ensured before the clone
+	// (zfs clone will not create parents) — regression for the real-ZFS
+	// "parent does not exist" failure.
+	if !f.findCall("zfs", "create", "-p", "embervm/sandboxes") {
+		t.Errorf("sandboxes parent not ensured before clone; calls=%v", f.calls)
+	}
 	fi, err := os.Stat(paths.DataRaw)
 	if err != nil {
 		t.Fatalf("stat data.raw: %v", err)
