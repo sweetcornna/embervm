@@ -58,12 +58,15 @@ func newTestServer(t *testing.T, agent nodeapi.Agent) http.Handler {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	store := testStore(t) // skips without PG
-	tokens := NewTokenStore(map[string]TokenInfo{"tok": {Owner: "alice", MaxSandboxes: 2}})
+	tokens := NewTokenStore(map[string]TokenInfo{
+		"tok":  {Owner: "alice", MaxSandboxes: 2},
+		"tok2": {Owner: "bob", MaxSandboxes: 2},
+	})
 	return NewServer(store, agent, tokens).Handler()
 }
 
-// call issues an authenticated request and returns the recorder.
-func call(h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
+// callAs issues a request authenticated as the given bearer token.
+func callAs(h http.Handler, token, method, path string, body any) *httptest.ResponseRecorder {
 	var rdr *bytes.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
@@ -72,10 +75,15 @@ func call(h http.Handler, method, path string, body any) *httptest.ResponseRecor
 		rdr = bytes.NewReader(nil)
 	}
 	req := httptest.NewRequest(method, path, rdr)
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	return w
+}
+
+// call issues a request as the default alice token.
+func call(h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
+	return callAs(h, "tok", method, path, body)
 }
 
 func TestServerFullLifecycle(t *testing.T) {
@@ -144,6 +152,58 @@ func TestServerQuota(t *testing.T) {
 	}
 	if w := call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID}); w.Code != http.StatusTooManyRequests {
 		t.Errorf("3rd sandbox = %d, want 429: %s", w.Code, w.Body)
+	}
+}
+
+// TestServerSandboxOwnership is the regression for the multi-tenant IDOR:
+// bob must not be able to see or touch alice's sandbox, on any verb.
+func TestServerSandboxOwnership(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+
+	// alice creates a sandbox.
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	if sb.ID == "" {
+		t.Fatalf("no sandbox id: %s", w.Body)
+	}
+
+	// bob must get 404 on every sandbox verb targeting alice's sandbox.
+	base := "/v0/sandboxes/" + sb.ID
+	probes := []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodGet, base, nil},
+		{http.MethodPost, base + "/pause", nil},
+		{http.MethodPost, base + "/resume", nil},
+		{http.MethodPost, base + "/snapshot", map[string]string{"tag": "x"}},
+		{http.MethodPost, base + "/exec", guestapi.ExecRequest{Cmd: "echo"}},
+		{http.MethodGet, base + "/files?path=/etc/hostname", nil},
+		{http.MethodPut, base + "/files?path=/tmp/x", nil},
+		{http.MethodDelete, base, nil},
+	}
+	for _, p := range probes {
+		if w := callAs(h, "tok2", p.method, p.path, p.body); w.Code != http.StatusNotFound {
+			t.Errorf("bob %s %s = %d, want 404 (cross-tenant access must be denied)", p.method, p.path, w.Code)
+		}
+	}
+
+	// bob's own list must not include alice's sandbox.
+	w = callAs(h, "tok2", http.MethodGet, "/v0/sandboxes", nil)
+	var bobList []Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &bobList)
+	if len(bobList) != 0 {
+		t.Errorf("bob sees %d sandboxes, want 0 (owner scoping)", len(bobList))
+	}
+
+	// alice still has full access.
+	if w := call(h, http.MethodGet, base, nil); w.Code != http.StatusOK {
+		t.Errorf("alice GET own sandbox = %d, want 200", w.Code)
 	}
 }
 

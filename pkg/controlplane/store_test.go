@@ -150,11 +150,11 @@ func TestStoreListFilter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	running, err := s.ListSandboxes(ctx, "RUNNING")
+	running, err := s.ListSandboxes(ctx, "", "RUNNING")
 	if err != nil || len(running) != 2 {
 		t.Fatalf("ListSandboxes(RUNNING) = %d, err=%v", len(running), err)
 	}
-	all, _ := s.ListSandboxes(ctx, "")
+	all, _ := s.ListSandboxes(ctx, "", "")
 	if len(all) != 3 {
 		t.Errorf("ListSandboxes(all) = %d, want 3", len(all))
 	}

@@ -1,6 +1,9 @@
 package controlplane
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +29,30 @@ func NewTokenStore(tokens map[string]TokenInfo) *TokenStore {
 func (ts *TokenStore) Lookup(token string) (TokenInfo, bool) {
 	info, ok := ts.tokens[token]
 	return info, ok
+}
+
+// DevTokenName / DevTokenInfo are the single token used when no tokens file
+// is configured (local dev convenience).
+const DevTokenName = "dev-token"
+
+// DevTokenStore returns a store with only the dev token (owner "dev", a
+// generous quota). Callers should log that they are using it.
+func DevTokenStore() *TokenStore {
+	return NewTokenStore(map[string]TokenInfo{DevTokenName: {Owner: "dev", MaxSandboxes: 100}})
+}
+
+// LoadTokensFromFile parses a JSON object mapping bearer tokens to
+// {owner,max_sandboxes}.
+func LoadTokensFromFile(path string) (*TokenStore, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]TokenInfo
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("parse tokens file: %w", err)
+	}
+	return NewTokenStore(m), nil
 }
 
 const ctxTokenKey = "embervm.token"

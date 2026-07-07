@@ -9,6 +9,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -192,13 +193,29 @@ func (s *Store) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
 		`SELECT `+sandboxCols+` FROM sandboxes WHERE id=$1`, id))
 }
 
-// ListSandboxes returns sandboxes, optionally filtered by state, newest first.
-func (s *Store) ListSandboxes(ctx context.Context, state string) ([]Sandbox, error) {
+// ListSandboxes returns sandboxes, optionally filtered by owner and/or state,
+// newest first. Empty owner or state means no filter on that column; the API
+// server always passes the authenticated owner so tenants never see each
+// other's sandboxes.
+func (s *Store) ListSandboxes(ctx context.Context, owner, state string) ([]Sandbox, error) {
 	q := `SELECT ` + sandboxCols + ` FROM sandboxes`
 	args := []any{}
+	var conds []string
+	if owner != "" {
+		args = append(args, owner)
+		conds = append(conds, `owner=$`+strconv.Itoa(len(args)))
+	}
 	if state != "" {
-		q += ` WHERE state=$1`
 		args = append(args, state)
+		conds = append(conds, `state=$`+strconv.Itoa(len(args)))
+	}
+	for i, cond := range conds {
+		if i == 0 {
+			q += ` WHERE `
+		} else {
+			q += ` AND `
+		}
+		q += cond
 	}
 	q += ` ORDER BY created_at DESC`
 	rows, err := s.pool.Query(ctx, q, args...)

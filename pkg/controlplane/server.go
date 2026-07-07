@@ -59,6 +59,23 @@ func abortErr(c *gin.Context, status int, err error) {
 	c.AbortWithStatusJSON(status, gin.H{"error": err.Error()})
 }
 
+// ownedSandbox fetches a sandbox and verifies the authenticated caller owns
+// it. A missing sandbox and one owned by another tenant both return 404 (not
+// 403) so callers cannot probe for the existence of other tenants' sandbox
+// IDs. Returns ok=false after writing the response.
+func (s *Server) ownedSandbox(c *gin.Context, id string) (Sandbox, bool) {
+	sb, err := s.store.GetSandbox(c, id)
+	if err != nil {
+		abortErr(c, storeStatus(err), err)
+		return Sandbox{}, false
+	}
+	if sb.Owner != tokenInfo(c).Owner {
+		abortErr(c, http.StatusNotFound, ErrNotFound)
+		return Sandbox{}, false
+	}
+	return sb, true
+}
+
 // storeStatus maps store errors to HTTP status.
 func storeStatus(err error) int {
 	if errors.Is(err, ErrNotFound) {
@@ -191,7 +208,9 @@ func (s *Server) createSandbox(c *gin.Context) {
 }
 
 func (s *Server) listSandboxes(c *gin.Context) {
-	list, err := s.store.ListSandboxes(c, c.Query("state"))
+	// Scope to the authenticated owner so tenants never see each other's
+	// sandboxes.
+	list, err := s.store.ListSandboxes(c, tokenInfo(c).Owner, c.Query("state"))
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
@@ -200,9 +219,8 @@ func (s *Server) listSandboxes(c *gin.Context) {
 }
 
 func (s *Server) getSandbox(c *gin.Context) {
-	sb, err := s.store.GetSandbox(c, c.Param("id"))
-	if err != nil {
-		abortErr(c, storeStatus(err), err)
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, sb)
@@ -210,9 +228,8 @@ func (s *Server) getSandbox(c *gin.Context) {
 
 func (s *Server) pauseSandbox(c *gin.Context) {
 	id := c.Param("id")
-	sb, err := s.store.GetSandbox(c, id)
-	if err != nil {
-		abortErr(c, storeStatus(err), err)
+	sb, ok := s.ownedSandbox(c, id)
+	if !ok {
 		return
 	}
 	if err := s.agent.PauseSandbox(c, id); err != nil {
@@ -229,9 +246,8 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 
 func (s *Server) resumeSandbox(c *gin.Context) {
 	id := c.Param("id")
-	sb, err := s.store.GetSandbox(c, id)
-	if err != nil {
-		abortErr(c, storeStatus(err), err)
+	sb, ok := s.ownedSandbox(c, id)
+	if !ok {
 		return
 	}
 	st, err := s.agent.ResumeSandbox(c, id)
@@ -249,6 +265,9 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 
 func (s *Server) snapshotSandbox(c *gin.Context) {
 	id := c.Param("id")
+	if _, ok := s.ownedSandbox(c, id); !ok {
+		return
+	}
 	var body struct {
 		Tag string `json:"tag"`
 	}
@@ -266,9 +285,8 @@ func (s *Server) snapshotSandbox(c *gin.Context) {
 
 func (s *Server) killSandbox(c *gin.Context) {
 	id := c.Param("id")
-	sb, err := s.store.GetSandbox(c, id)
-	if err != nil {
-		abortErr(c, storeStatus(err), err)
+	sb, ok := s.ownedSandbox(c, id)
+	if !ok {
 		return
 	}
 	if err := s.agent.StopSandbox(c, id); err != nil {
@@ -285,6 +303,9 @@ func (s *Server) killSandbox(c *gin.Context) {
 // --- guest proxy ------------------------------------------------------------
 
 func (s *Server) execSandbox(c *gin.Context) {
+	if _, ok := s.ownedSandbox(c, c.Param("id")); !ok {
+		return
+	}
 	var req guestapi.ExecRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		abortErr(c, http.StatusBadRequest, err)
@@ -299,6 +320,9 @@ func (s *Server) execSandbox(c *gin.Context) {
 }
 
 func (s *Server) readFile(c *gin.Context) {
+	if _, ok := s.ownedSandbox(c, c.Param("id")); !ok {
+		return
+	}
 	path := c.Query("path")
 	if path == "" {
 		abortErr(c, http.StatusBadRequest, errors.New("path is required"))
@@ -313,6 +337,9 @@ func (s *Server) readFile(c *gin.Context) {
 }
 
 func (s *Server) writeFile(c *gin.Context) {
+	if _, ok := s.ownedSandbox(c, c.Param("id")); !ok {
+		return
+	}
 	path := c.Query("path")
 	if path == "" {
 		abortErr(c, http.StatusBadRequest, errors.New("path is required"))
