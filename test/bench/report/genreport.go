@@ -49,20 +49,21 @@ const (
 	reapBandHighMBs = 533.0
 )
 
-// envInfo mirrors env.json.
+// envInfo mirrors env.json as written by scripts/env-check.sh.
 type envInfo struct {
-	EnvType           string `json:"env_type"`
-	CPUModel          string `json:"cpu_model"`
+	Timestamp         string `json:"timestamp"`
 	Kernel            string `json:"kernel"`
-	CPUs              int    `json:"cpus"`
-	MemMB             int    `json:"mem_mb"`
-	DiskFreeGB        int    `json:"disk_free_gb"`
+	OS                string `json:"os"`
+	CPUModel          string `json:"cpu_model"`
+	Nproc             int    `json:"nproc"`
+	MemTotalKB        int64  `json:"mem_total_kb"`
+	DiskFreeKB        int64  `json:"disk_free_kb"`
 	KVM               bool   `json:"kvm"`
-	VMX               bool   `json:"vmx"`
-	EPT               string `json:"ept"`
-	UnrestrictedGuest string `json:"unrestricted_guest"`
-	Cgroup2           bool   `json:"cgroup2"`
-	CollectedUnix     int64  `json:"collected_unix"`
+	KVMWritable       bool   `json:"kvm_writable"`
+	Cgroup2           bool   `json:"cgroup_v2"`
+	UnprivUserfaultfd int    `json:"unprivileged_userfaultfd"`
+	Virt              string `json:"virt"`
+	Provider          string `json:"provider"`
 }
 
 // restoreSample is one iteration of one restore matrix cell.
@@ -77,20 +78,22 @@ type restoreSample struct {
 	BytesCopiedPrefetch int64   `json:"bytes_copied_prefetch"`
 }
 
-// restoreCell mirrors one restore-*.json file (one matrix cell).
+// restoreCell mirrors one restore-*.json file (one matrix cell) as written
+// by test/bench/restore-matrix.sh.
 type restoreCell struct {
-	Mode      string          `json:"mode"`
-	MemGB     float64         `json:"mem_gb"`
-	Cache     string          `json:"cache"`
-	FCVersion string          `json:"fc_version"`
-	DirtyMB   int             `json:"dirty_mb"`
-	Skipped   *string         `json:"skipped"`
-	Samples   []restoreSample `json:"samples"`
+	Mode       string          `json:"mode"`
+	MemGB      float64         `json:"mem_gb"`
+	Cache      string          `json:"cache"`
+	FCVersion  string          `json:"fc_version"`
+	DirtyMB    int             `json:"dirty_mb"`
+	Skipped    bool            `json:"skipped"`
+	SkipReason string          `json:"skip_reason"`
+	Samples    []restoreSample `json:"samples"`
 }
 
 // isSkipped reports whether the cell was deliberately not run.
 func (c restoreCell) isSkipped() bool {
-	return c.Skipped != nil && *c.Skipped != ""
+	return c.Skipped
 }
 
 // uffdioCell is one op x threads x chunk cell of the UFFDIO_COPY sweep.
@@ -106,7 +109,7 @@ type uffdioCell struct {
 type uffdioReport struct {
 	PageSize int          `json:"page_size"`
 	RegionMB int          `json:"region_mb"`
-	Seconds  int          `json:"seconds"`
+	Seconds  float64      `json:"seconds"`
 	Cells    []uffdioCell `json:"cells"`
 }
 
@@ -114,11 +117,11 @@ type uffdioReport struct {
 type zfsCell struct {
 	Backend      string  `json:"backend"`
 	Recordsize   string  `json:"recordsize"`
-	Volblocksize string  `json:"volblocksize"`
 	Primarycache string  `json:"primarycache"`
 	Workload     string  `json:"workload"`
 	IOPS         float64 `json:"iops"`
 	BWMBs        float64 `json:"bw_mb_s"`
+	LatP99Us     float64 `json:"lat_p99_us"`
 }
 
 // zfsSyncTest is the sync=standard vs sync=disabled comparison.
@@ -129,12 +132,20 @@ type zfsSyncTest struct {
 	SpeedupPct   float64 `json:"speedup_pct"`
 }
 
-// zfsReport mirrors zfs-compare.json.
+// zfsEnv is the environment stamp inside zfs-compare.json.
+type zfsEnv struct {
+	Kernel     string `json:"kernel"`
+	ZFSVersion string `json:"zfs_version"`
+	Vdev       string `json:"vdev"`
+}
+
+// zfsReport mirrors zfs-compare.json as written by test/bench/zfs-compare.sh.
 type zfsReport struct {
-	Caveat   string       `json:"caveat"`
-	IOEngine string       `json:"ioengine"`
-	Cells    []zfsCell    `json:"cells"`
-	SyncTest *zfsSyncTest `json:"sync_test"`
+	Skipped     bool         `json:"skipped"`
+	Reason      string       `json:"reason"`
+	Env         *zfsEnv      `json:"env"`
+	Cells       []zfsCell    `json:"cells"`
+	SyncCompare *zfsSyncTest `json:"sync_compare"`
 }
 
 func main() {
@@ -170,7 +181,7 @@ func buildReport(dir string) string {
 
 	// Unknown environment is treated as non-bare-metal: the disclaimer is
 	// the safe default (docs/zh/06 §2).
-	nested := env == nil || !isBareMetal(env.EnvType)
+	nested := env == nil || !isBareMetal(env.Virt)
 
 	var b strings.Builder
 	writeHeader(&b, env, nested)
@@ -260,12 +271,17 @@ func writeHeader(b *strings.Builder, env *envInfo, nested bool) {
 	if env == nil {
 		b.WriteString("Environment: " + noData + "\n\n")
 	} else {
-		fmt.Fprintf(b, "Environment: (%s, %s, kernel %s)\n\n", env.EnvType, env.CPUModel, env.Kernel)
-		fmt.Fprintf(b, "- CPUs: %d, memory: %d MB, free disk: %d GB\n", env.CPUs, env.MemMB, env.DiskFreeGB)
-		fmt.Fprintf(b, "- KVM: %t, VMX: %t, EPT: %s, unrestricted_guest: %s, cgroup v2: %t\n",
-			env.KVM, env.VMX, orDash(env.EPT), orDash(env.UnrestrictedGuest), env.Cgroup2)
-		if env.CollectedUnix > 0 {
-			fmt.Fprintf(b, "- Environment probed at: %s\n", time.Unix(env.CollectedUnix, 0).UTC().Format(time.RFC3339))
+		envType := orDash(env.Virt)
+		if env.Provider != "" {
+			envType += "@" + env.Provider
+		}
+		fmt.Fprintf(b, "Environment triple: (%s, %s, kernel %s)\n\n", envType, orDash(env.CPUModel), env.Kernel)
+		fmt.Fprintf(b, "- CPUs: %d, memory: %d MB, free disk: %d GB\n",
+			env.Nproc, env.MemTotalKB/1024, env.DiskFreeKB/(1024*1024))
+		fmt.Fprintf(b, "- KVM: %t (writable: %t), cgroup v2: %t, unprivileged_userfaultfd: %d\n",
+			env.KVM, env.KVMWritable, env.Cgroup2, env.UnprivUserfaultfd)
+		if env.Timestamp != "" {
+			fmt.Fprintf(b, "- Environment probed at: %s\n", env.Timestamp)
 		}
 		b.WriteString("\n")
 	}
@@ -337,7 +353,7 @@ func restoreRow(c restoreCell) []string {
 	if c.isSkipped() {
 		return []string{
 			c.Mode, mem, "—",
-			fmt.Sprintf("_skipped: %s_", *c.Skipped), "—", "—",
+			fmt.Sprintf("_skipped: %s_", c.SkipReason), "—", "—",
 			"—", "—", "—",
 			"—", "—",
 		}
@@ -509,7 +525,7 @@ func writeUffdioSection(b *strings.Builder, r *uffdioReport) {
 		return
 	}
 
-	fmt.Fprintf(b, "page_size = %d B, region = %d MB, duration = %d s per cell.\n\n",
+	fmt.Fprintf(b, "page_size = %d B, region = %d MB, duration = %g s per cell.\n\n",
 		r.PageSize, r.RegionMB, r.Seconds)
 
 	cells := make([]uffdioCell, len(r.Cells))
@@ -563,16 +579,19 @@ func writeUffdioSection(b *strings.Builder, r *uffdioReport) {
 
 func writeZFSSection(b *strings.Builder, r *zfsReport) {
 	b.WriteString("## 4. ZFS raw-file-on-dataset vs zvol\n\n")
+	if r != nil && r.Skipped {
+		fmt.Fprintf(b, "_skipped on this runner: %s — deferred to bare metal (M1)._\n\n", orDash(r.Reason))
+		return
+	}
 	if r == nil || len(r.Cells) == 0 {
 		b.WriteString(noData + "\n\n")
 		return
 	}
 
-	if r.Caveat != "" {
-		fmt.Fprintf(b, "> **Caveat: %s**\n\n", r.Caveat)
-	}
-	if r.IOEngine != "" {
-		fmt.Fprintf(b, "fio ioengine: %s.\n\n", r.IOEngine)
+	if r.Env != nil {
+		fmt.Fprintf(b, "> **Caveat: %s vdev, kernel %s, zfs %s — pool on a loop file; "+
+			"functional reference only, not a production disk layout.**\n\n",
+			orDash(r.Env.Vdev), orDash(r.Env.Kernel), orDash(r.Env.ZFSVersion))
 	}
 
 	cells := make([]zfsCell, len(r.Cells))
@@ -584,16 +603,12 @@ func writeZFSSection(b *strings.Builder, r *zfsReport) {
 		return cells[i].Backend < cells[j].Backend
 	})
 
-	headers := []string{"backend", "block size", "primarycache", "workload", "IOPS", "BW (MB/s)"}
+	headers := []string{"backend", "block size", "primarycache", "workload", "IOPS", "BW (MB/s)", "lat P99 (µs)"}
 	rows := make([][]string, 0, len(cells))
 	for _, c := range cells {
-		bs := c.Recordsize
-		if bs == "" {
-			bs = c.Volblocksize
-		}
 		rows = append(rows, []string{
-			c.Backend, orDash(bs), orDash(c.Primarycache), c.Workload,
-			f1(c.IOPS), f1(c.BWMBs),
+			c.Backend, orDash(c.Recordsize), orDash(c.Primarycache), c.Workload,
+			f1(c.IOPS), f1(c.BWMBs), f1(c.LatP99Us),
 		})
 	}
 	b.WriteString(benchstat.MarkdownTable(headers, rows))
@@ -601,7 +616,7 @@ func writeZFSSection(b *strings.Builder, r *zfsReport) {
 
 	writeZFSRatios(b, cells)
 
-	if st := r.SyncTest; st != nil && st.Workload != "" {
+	if st := r.SyncCompare; st != nil && st.Workload != "" {
 		speedup := st.SpeedupPct
 		if speedup == 0 && st.StandardIOPS > 0 {
 			speedup = (st.DisabledIOPS/st.StandardIOPS - 1) * 100
@@ -634,7 +649,7 @@ func writeZFSRatios(b *strings.Builder, cells []zfsCell) {
 
 	var lines []string
 	for _, w := range workloads {
-		raw, hasRaw := best[w]["dataset-rawfile"]
+		raw, hasRaw := best[w]["raw-file"]
 		zvol, hasZvol := best[w]["zvol"]
 		if !hasRaw || !hasZvol {
 			continue
@@ -676,7 +691,7 @@ func writeMethodology(b *strings.Builder, cells []restoreCell, warnings []string
 	for _, c := range cells {
 		if c.isSkipped() {
 			entries = append(entries, fmt.Sprintf("- skipped cell %s / %s / %s GB: %s",
-				orDash(c.Cache), c.Mode, formatMemGB(c.MemGB), *c.Skipped))
+				orDash(c.Cache), c.Mode, formatMemGB(c.MemGB), c.SkipReason))
 		}
 	}
 	for _, w := range warnings {
