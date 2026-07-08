@@ -258,6 +258,29 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: requires restore_mode=chunked", sandboxID)
 	}
 
+	// A destructive HOT→WARM release CASes the row to WARM BEFORE it acts
+	// (ADR-0004 D2), so a prompt resume can land here while this node is
+	// still tearing the sandbox down. The release deletes the in-memory
+	// entry LAST — wait it out, then clear any dataset remnant (in WARM the
+	// L1 objects are the only truth; local leftovers would make the chain
+	// receive fail with "destination is a clone").
+	relDeadline := time.Now().Add(30 * time.Second)
+	for {
+		a.mu.Lock()
+		_, releasing := a.sbx[sandboxID]
+		a.mu.Unlock()
+		if !releasing {
+			break
+		}
+		if time.Now().After(relDeadline) {
+			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: local release still in flight", sandboxID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := a.cfg.Storage.DestroySandbox(ctx, sandboxID); err != nil {
+		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: clear local remnant: %w", sandboxID, err)
+	}
+
 	var desc SnapshotDescriptor
 	if err := getJSONFrom(ctx, src, KeySnapshotJSON(sandboxID), &desc); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: descriptor: %w", sandboxID, err)

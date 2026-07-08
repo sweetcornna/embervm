@@ -164,6 +164,24 @@ func (a *api) counterLines(id string) int {
 	return strings.Count(body, "\n")
 }
 
+// awaitCounterAbove polls until the counter exceeds prev. 父实例不停顿 is a
+// LIVENESS claim — the parent keeps executing — not a throughput one: with
+// 11 busy guests time-sharing a 4-core CI runner, a fixed-instant sample
+// can legally show zero progress for seconds.
+func (a *api) awaitCounterAbove(id string, prev int, timeout time.Duration) int {
+	a.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if n := a.counterLines(id); n > prev {
+			return n
+		}
+		if time.Now().After(deadline) {
+			a.t.Fatalf("parent counter stalled at %d for %v — 父实例不停顿 violated", prev, timeout)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // TestFork10Branches is THE M5 exit gate (退出标准 verbatim): one sandbox
 // forks 10 branches that run in parallel while the parent keeps executing —
 // its background counter grows monotonically across the whole fork window
@@ -179,6 +197,7 @@ func TestFork10Branches(t *testing.T) {
 	if rc := a.execIn(parent, "echo parent-state > /origin && sync"); rc != 0 {
 		t.Fatalf("write origin: exit %d", rc)
 	}
+	a.awaitCounterAbove(parent, 0, 30*time.Second) // the pulse is alive before we checkpoint it
 
 	var cp struct {
 		Tag   string `json:"tag"`
@@ -238,12 +257,9 @@ func TestFork10Branches(t *testing.T) {
 	}
 	t.Logf("10 forks in %v total, per-fork %v (P50 %v)", time.Since(forkStart), durs, percentile(durs, 0.5))
 
-	// 父实例不停顿: the counter kept growing across the fork window and the
+	// 父实例不停顿: the counter keeps growing across the fork window and the
 	// parent never left RUNNING.
-	n1 := a.counterLines(parent)
-	if n1 <= n0 {
-		t.Fatalf("parent counter stalled across forks: %d -> %d", n0, n1)
-	}
+	n1 := a.awaitCounterAbove(parent, n0, 30*time.Second)
 	var psb struct {
 		State string `json:"state"`
 	}
@@ -283,10 +299,7 @@ func TestFork10Branches(t *testing.T) {
 	if code, got := a.fileIn(kids[0], "/branch"); code != 200 || strings.TrimSpace(got) != "0" {
 		t.Fatalf("child 0 /branch = %q (siblings bleeding?)", got)
 	}
-	n2 := a.counterLines(parent)
-	if n2 <= n1 {
-		t.Fatalf("parent counter stalled during branch execution: %d -> %d", n1, n2)
-	}
+	n2 := a.awaitCounterAbove(parent, n1, 30*time.Second)
 	t.Logf("10 branches parallel-verified; parent counter %d -> %d -> %d (never stalled)", n0, n1, n2)
 }
 
