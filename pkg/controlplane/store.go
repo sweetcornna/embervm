@@ -414,16 +414,21 @@ type Node struct {
 	Addr        string    `json:"addr,omitempty"`
 	State       string    `json:"state"`
 	CapacityMiB int       `json:"capacity_mib"`
+	CPUCores    int       `json:"cpu_cores,omitempty"` // physical cores; 0 = unknown (no vCPU constraint)
 	LastSeen    time.Time `json:"last_seen"`
 }
 
-// UpsertNode registers/refreshes a node.
+// UpsertNode registers/refreshes a node. Zero-valued addr/cpu_cores never
+// clobber what an earlier registration or heartbeat already recorded.
 func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO nodes (id, addr, state, capacity_mib, last_seen)
-		 VALUES ($1,$2,'up',$3,now())
-		 ON CONFLICT (id) DO UPDATE SET addr=$2, capacity_mib=$3`,
-		n.ID, n.Addr, n.CapacityMiB)
+		`INSERT INTO nodes (id, addr, state, capacity_mib, cpu_cores, last_seen)
+		 VALUES ($1,$2,'up',$3,$4,now())
+		 ON CONFLICT (id) DO UPDATE SET
+		   addr = CASE WHEN $2 <> '' THEN $2 ELSE nodes.addr END,
+		   capacity_mib = $3,
+		   cpu_cores = CASE WHEN $4 > 0 THEN $4 ELSE nodes.cpu_cores END`,
+		n.ID, n.Addr, n.CapacityMiB, n.CPUCores)
 	return err
 }
 
@@ -442,7 +447,7 @@ func (s *Store) SetNodeState(ctx context.Context, id, state string) error {
 
 // ListNodes returns the registry.
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, addr, state, capacity_mib, last_seen FROM nodes ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT id, addr, state, capacity_mib, cpu_cores, last_seen FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +455,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	var out []Node
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Addr, &n.State, &n.CapacityMiB, &n.LastSeen); err != nil {
+		if err := rows.Scan(&n.ID, &n.Addr, &n.State, &n.CapacityMiB, &n.CPUCores, &n.LastSeen); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -458,25 +463,32 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	return out, rows.Err()
 }
 
-// NodeUsage sums the memory of active sandboxes per node (the bin-packing
-// constraint; PostgreSQL is the single source of truth for placement).
-func (s *Store) NodeUsage(ctx context.Context) (map[string]int, error) {
+// Usage is one node's active-sandbox resource footprint.
+type Usage struct {
+	MemMiB int
+	VCPUs  int
+}
+
+// NodeUsage sums the memory and vCPUs of active sandboxes per node (the
+// bin-packing constraints; PostgreSQL is the single source of truth for
+// placement).
+func (s *Store) NodeUsage(ctx context.Context) (map[string]Usage, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT node_id, COALESCE(SUM(memory_mib),0) FROM sandboxes
+		`SELECT node_id, COALESCE(SUM(memory_mib),0), COALESCE(SUM(vcpus),0) FROM sandboxes
 		 WHERE state IN ('STARTING','RUNNING','RESUMING','PAUSING') AND node_id <> ''
 		 GROUP BY node_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]int{}
+	out := map[string]Usage{}
 	for rows.Next() {
 		var id string
-		var used int
-		if err := rows.Scan(&id, &used); err != nil {
+		var u Usage
+		if err := rows.Scan(&id, &u.MemMiB, &u.VCPUs); err != nil {
 			return nil, err
 		}
-		out[id] = used
+		out[id] = u
 	}
 	return out, rows.Err()
 }

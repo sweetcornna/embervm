@@ -14,6 +14,7 @@ import (
 type schedMockAgent struct {
 	cpMockAgent
 	capacity int
+	cores    int
 	dead     atomic.Bool
 	failed   []string // drained by Healthz, like the real agent's watchdog list
 }
@@ -22,7 +23,7 @@ func (m *schedMockAgent) Healthz(context.Context) (nodeapi.NodeHealth, error) {
 	if m.dead.Load() {
 		return nodeapi.NodeHealth{}, errors.New("connection refused")
 	}
-	h := nodeapi.NodeHealth{CapacityMiB: m.capacity, FailedSandboxes: m.failed}
+	h := nodeapi.NodeHealth{CapacityMiB: m.capacity, CPUCores: m.cores, FailedSandboxes: m.failed}
 	m.failed = nil
 	return h, nil
 }
@@ -55,7 +56,7 @@ func TestSchedulerPlaceSticky(t *testing.T) {
 	ctx := context.Background()
 
 	// n2 has more free memory, but stickiness to n1 wins when n1 fits.
-	node, err := sched.Place(ctx, "n1", 1024)
+	node, err := sched.Place(ctx, "n1", 1024, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestSchedulerPlaceSticky(t *testing.T) {
 		t.Fatalf("Place(sticky n1) = %s, want n1", node)
 	}
 	// No previous node: bin-pack to the roomiest.
-	node, err = sched.Place(ctx, "", 1024)
+	node, err = sched.Place(ctx, "", 1024, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +87,7 @@ func TestSchedulerPlaceRespectsUsage(t *testing.T) {
 	}
 
 	// 512MiB no longer fits on n1, even sticky.
-	node, err := sched.Place(ctx, "n1", 512)
+	node, err := sched.Place(ctx, "n1", 512, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +95,7 @@ func TestSchedulerPlaceRespectsUsage(t *testing.T) {
 		t.Fatalf("Place = %s, want n2 (n1 full)", node)
 	}
 	// And nothing fits 2048.
-	if _, err := sched.Place(ctx, "", 2048); !errors.Is(err, ErrNoCapacity) {
+	if _, err := sched.Place(ctx, "", 2048, 1); !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("Place(2048) = %v, want ErrNoCapacity", err)
 	}
 }
@@ -147,7 +148,7 @@ func TestSchedulerEvictsDeadNode(t *testing.T) {
 		t.Fatalf("survivor state = %s, want PAUSED_WARM (untouched)", sb.State)
 	}
 	// Placement skips the dead node entirely.
-	node, err := sched.Place(ctx, "n1", 256)
+	node, err := sched.Place(ctx, "n1", 256, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,5 +222,48 @@ func TestSchedulerWatchdogWriteThrough(t *testing.T) {
 	}
 	if sb.State != "PAUSED_WARM" {
 		t.Fatalf("settled sandbox state = %s, want PAUSED_WARM (untouched)", sb.State)
+	}
+}
+
+// TestSchedulerCPUOvercommit proves the vCPU budget: cores × ratio, with
+// unreported cores (0) unconstrained.
+func TestSchedulerCPUOvercommit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := &schedMockAgent{capacity: 8192, cores: 2}
+	sched := NewScheduler(s, NewRegistry(map[string]nodeapi.Agent{"n1": a}),
+		SchedulerConfig{CPUOvercommit: 3.0})
+	if err := sched.RegisterNodes(ctx, map[string]string{"n1": ""}, map[string]int{"n1": 8192}); err != nil {
+		t.Fatal(err)
+	}
+	// Heartbeat records the core count.
+	if err := sched.pollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Budget = 2 cores × 3.0 = 6 vCPUs. Occupy 5 of them.
+	id := pausedSandbox(t, s, "RUNNING", time.Second)
+	if err := s.SetSandboxNode(ctx, id, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE sandboxes SET vcpus=5, memory_mib=256 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1 more vCPU fits (5+1 <= 6); memory is plentiful.
+	if node, err := sched.Place(ctx, "", 256, 1); err != nil || node != "n1" {
+		t.Fatalf("Place(1 vcpu) = %s, %v; want n1", node, err)
+	}
+	// 2 more do not (5+2 > 6) — CPU is the binding constraint.
+	if _, err := sched.Place(ctx, "", 256, 2); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("Place(2 vcpus) = %v, want ErrNoCapacity", err)
+	}
+
+	// A node that never reported cores is CPU-unconstrained.
+	if _, err := s.pool.Exec(ctx, `UPDATE nodes SET cpu_cores=0 WHERE id='n1'`); err != nil {
+		t.Fatal(err)
+	}
+	if node, err := sched.Place(ctx, "", 256, 64); err != nil || node != "n1" {
+		t.Fatalf("Place(64 vcpus, no core report) = %s, %v; want n1", node, err)
 	}
 }

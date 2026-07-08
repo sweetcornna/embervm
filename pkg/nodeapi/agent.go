@@ -27,6 +27,9 @@ type NodeHealth struct {
 	CapacityMiB int `json:"capacity_mib"`
 	UsedMiB     int `json:"used_mib"`
 	Sandboxes   int `json:"sandboxes"`
+	// CPUCores is the node's physical core count — the base the scheduler
+	// multiplies by its CPU overcommit ratio (M4 超售).
+	CPUCores int `json:"cpu_cores,omitempty"`
 	// FailedSandboxes are ids the node's watchdog reaped since they were
 	// last reported; the scheduler writes them through to PostgreSQL.
 	FailedSandboxes []string `json:"failed_sandboxes,omitempty"`

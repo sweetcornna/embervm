@@ -166,7 +166,7 @@ func (s *Server) createTemplate(c *gin.Context) {
 	}
 	// Builds synchronously on one node; the template ships to every other
 	// node as a zfs stream via L1 (GUID lineage) and is received on demand.
-	buildNode, err := s.sched.Place(c, "", 0)
+	buildNode, err := s.sched.Place(c, "", 0, 0)
 	if err != nil {
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
@@ -264,7 +264,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		return
 	}
 
-	nodeID, err := s.sched.Place(c, "", body.MemoryMiB)
+	nodeID, err := s.sched.Place(c, "", body.MemoryMiB, body.VCPUs)
 	if err != nil {
 		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
@@ -365,7 +365,7 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 			tier = "cold"
 		}
 		var nodeID string
-		nodeID, err = s.sched.Place(c, sb.NodeID, sb.MemoryMiB)
+		nodeID, err = s.sched.Place(c, sb.NodeID, sb.MemoryMiB, sb.VCPUs)
 		if err != nil {
 			_ = s.store.SetSandboxState(c, id, string(lifecycle.StateResuming), string(lifecycle.StateFailed), "", err.Error())
 			abortErr(c, http.StatusServiceUnavailable, err)
@@ -480,7 +480,7 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	nodeID, err := s.sched.Place(c, sb.NodeID, sb.MemoryMiB)
+	nodeID, err := s.sched.Place(c, sb.NodeID, sb.MemoryMiB, sb.VCPUs)
 	if err != nil {
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return

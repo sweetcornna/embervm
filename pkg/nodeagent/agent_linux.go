@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -309,6 +311,18 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 		return err
 	}
 	c := fcclient.New(a.fcAPISock(sb))
+	if a.chunked() && a.cfg.PauseBalloonSettle > 0 {
+		// Balloon-assisted pause (docs/zh/02 §3): inflating hands the
+		// guest's free pages back before the snapshot, and the chunk
+		// pipeline's zero-page skip drops them from the diff (CodeSandbox:
+		// 16GiB 快照 13GiB 可跳过). Best-effort — a guest kernel without
+		// virtio-balloon simply frees nothing.
+		if err := c.PatchBalloon(ctx, sb.memMiB/2); err != nil {
+			log.Printf("nodeagent: balloon inflate %s: %v", sb.id, err)
+		} else {
+			time.Sleep(a.cfg.PauseBalloonSettle)
+		}
+	}
 	if err := c.PatchVMState(ctx, "Paused"); err != nil {
 		return err
 	}
@@ -418,6 +432,13 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	_, _ = sb.guest.Resumed(rctx)
 	cancel()
+	if a.chunked() && a.cfg.PauseBalloonSettle > 0 {
+		// The snapshot carries the pause-time inflation; hand the memory
+		// back so the guest is not running squeezed.
+		if err := c.PatchBalloon(ctx, 0); err != nil {
+			log.Printf("nodeagent: balloon deflate %s: %v", sb.id, err)
+		}
+	}
 	return a.statusLocked(sb), nil
 }
 
@@ -514,6 +535,7 @@ func (a *Agent) Healthz(_ context.Context) (nodeapi.NodeHealth, error) {
 		CapacityMiB:     a.cfg.CapacityMiB,
 		UsedMiB:         used,
 		Sandboxes:       len(a.sbx),
+		CPUCores:        runtime.NumCPU(),
 		FailedSandboxes: a.failed,
 	}
 	a.failed = nil // reported once; the control plane owns it now

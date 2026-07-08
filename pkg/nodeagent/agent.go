@@ -54,4 +54,11 @@ type Config struct {
 	// the agent's back are force-FAILED and reported via Healthz. 0 = off
 	// (unit tests drive reapZombies directly).
 	WatchdogInterval time.Duration
+
+	// PauseBalloonSettle enables balloon-assisted pause (chunked mode)
+	// when > 0: inflate the balloon to half the guest's memory, wait this
+	// long for the guest to hand pages back, then snapshot — the chunk
+	// pipeline's zero-page skip drops the freed pages from the diff.
+	// Resume deflates. 0 = off.
+	PauseBalloonSettle time.Duration
 }

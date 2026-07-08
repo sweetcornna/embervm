@@ -58,6 +58,15 @@ func (r *Registry) IDs() []string {
 type SchedulerConfig struct {
 	PollInterval  time.Duration // default 5s
 	MissThreshold int           // consecutive failed polls before eviction; default 3
+	// MemOvercommit scales each node's memory budget for placement
+	// (docs/zh/03 M4 超售). Overselling is survivable because balloon
+	// reclaim (SetBalloon) and balloon-assisted pause hand free guest
+	// pages back to the host. Default 1.0 (no oversell).
+	MemOvercommit float64
+	// CPUOvercommit budgets Σ vcpus at cores × ratio — vCPUs are time-
+	// shared, so 3x is the documented starting point. Nodes that never
+	// reported cores (cpu_cores=0) are unconstrained. Default 3.0.
+	CPUOvercommit float64
 }
 
 func (c SchedulerConfig) withDefaults() SchedulerConfig {
@@ -66,6 +75,12 @@ func (c SchedulerConfig) withDefaults() SchedulerConfig {
 	}
 	if c.MissThreshold <= 0 {
 		c.MissThreshold = 3
+	}
+	if c.MemOvercommit <= 0 {
+		c.MemOvercommit = 1.0
+	}
+	if c.CPUOvercommit <= 0 {
+		c.CPUOvercommit = 3.0
 	}
 	return c
 }
@@ -146,8 +161,8 @@ func (s *Scheduler) pollOnce(ctx context.Context) error {
 				log.Printf("scheduler: node %s watchdog reaped %s (%s)", id, sbID, cause)
 			}
 		}
-		if h.CapacityMiB > 0 {
-			if err := s.store.UpsertNode(ctx, Node{ID: id, CapacityMiB: h.CapacityMiB}); err != nil {
+		if h.CapacityMiB > 0 || h.CPUCores > 0 {
+			if err := s.store.UpsertNode(ctx, Node{ID: id, CapacityMiB: h.CapacityMiB, CPUCores: h.CPUCores}); err != nil {
 				return err
 			}
 			_ = s.store.TouchNode(ctx, id) // upsert resets state; re-stamp
@@ -180,10 +195,12 @@ func (s *Scheduler) recordMiss(ctx context.Context, id string, cause error) {
 	log.Printf("scheduler: node %s evicted; %d active sandboxes marked FAILED (restorable from L1)", id, failed)
 }
 
-// Place picks a node for a sandbox needing memoryMiB: the previous node
-// when it is up with room (L0 cache stickiness), else the up node with the
-// most free memory. PostgreSQL is the source of truth for usage.
-func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB int) (string, error) {
+// Place picks a node for a sandbox needing memoryMiB and vcpus: the
+// previous node when it is up with room (L0 cache stickiness), else the up
+// node with the most free memory. Budgets are oversold per SchedulerConfig
+// (memory × MemOvercommit, cores × CPUOvercommit). PostgreSQL is the source
+// of truth for usage.
+func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB, vcpus int) (string, error) {
 	nodes, err := s.store.ListNodes(ctx)
 	if err != nil {
 		return "", err
@@ -192,11 +209,23 @@ func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB in
 	if err != nil {
 		return "", err
 	}
-	free := func(n Node) int {
-		if n.CapacityMiB <= 0 {
-			return 1 << 30 // unlimited (dev)
+	// fits returns the node's free memory budget and whether both the
+	// memory and vCPU constraints admit the sandbox.
+	fits := func(n Node) (int, bool) {
+		freeMem := 1 << 30 // unlimited (dev)
+		if n.CapacityMiB > 0 {
+			freeMem = int(float64(n.CapacityMiB)*s.cfg.MemOvercommit) - usage[n.ID].MemMiB
 		}
-		return n.CapacityMiB - usage[n.ID]
+		if freeMem < memoryMiB {
+			return 0, false
+		}
+		if n.CPUCores > 0 {
+			freeCPU := int(float64(n.CPUCores)*s.cfg.CPUOvercommit) - usage[n.ID].VCPUs
+			if freeCPU < vcpus {
+				return 0, false
+			}
+		}
+		return freeMem, true
 	}
 	var best string
 	bestFree := -1
@@ -204,8 +233,8 @@ func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB in
 		if n.State != "up" {
 			continue
 		}
-		f := free(n)
-		if f < memoryMiB {
+		f, ok := fits(n)
+		if !ok {
 			continue
 		}
 		if n.ID == previousNode {
@@ -216,7 +245,7 @@ func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB in
 		}
 	}
 	if best == "" {
-		return "", fmt.Errorf("%w (need %d MiB)", ErrNoCapacity, memoryMiB)
+		return "", fmt.Errorf("%w (need %d MiB / %d vcpus)", ErrNoCapacity, memoryMiB, vcpus)
 	}
 	return best, nil
 }
