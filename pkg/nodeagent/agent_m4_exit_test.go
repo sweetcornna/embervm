@@ -187,6 +187,16 @@ func startClusterNode(t *testing.T, pool string, i int) *clusterNode {
 
 	dir := t.TempDir()
 	sock := filepath.Join(dir, id+".sock")
+	// The jail lives OUTSIDE t.TempDir(): the jailed API socket's host path
+	// is <base>/firecracker/<uuid>/root/run/firecracker.socket, and with
+	// t.TempDir()'s long prefix it blows the 108-byte unix sun_path limit
+	// (every connect fails EINVAL while FC listens fine in-chroot).
+	// Deliberately leaked: kill -9'd daemons leave bind mounts behind, and
+	// the CI runner is ephemeral.
+	jailBase, err := os.MkdirTemp("", "j")
+	if err != nil {
+		t.Fatal(err)
+	}
 	logf, err := os.Create(filepath.Join(dir, id+".log"))
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +222,7 @@ func startClusterNode(t *testing.T, pool string, i int) *clusterNode {
 		// restorable on ANY node (D3) — and what the kill-node recovery
 		// depends on when all three subtrees share the CI host.
 		"--jailer-bin", os.Getenv("EMBERVM_JAILER_BIN"),
-		"--jailer-chroot-base", filepath.Join(dir, "jail"),
+		"--jailer-chroot-base", jailBase,
 	)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	if err := cmd.Start(); err != nil {

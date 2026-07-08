@@ -255,6 +255,14 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 // returns the API socket path.
 func (a *Agent) launchFC(sb *sandbox, logName string) (string, error) {
 	apiSock := a.fcAPISock(sb)
+	// sun_path is 108 bytes on Linux. A too-long host-side path fails every
+	// connect(2) with EINVAL while Firecracker sits happily listening on the
+	// short in-chroot path — a silent 10s timeout instead of an answer. The
+	// jailed path grows with the chroot base AND the sandbox id (uuid), so
+	// validate loudly up front.
+	if len(apiSock) > 104 {
+		return "", fmt.Errorf("api socket path is %d bytes (unix sun_path limit): %s — use a shorter jailer chroot base or work dir", len(apiSock), apiSock)
+	}
 	_ = os.Remove(apiSock)
 	var fc *exec.Cmd
 	if a.jailed() {
@@ -727,12 +735,15 @@ func waitSocket(path string, timeout time.Duration) error {
 // Firecracker — and must keep the stat-based wait.
 func waitSocketReady(path string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		if conn, err := net.Dial("unix", path); err == nil {
+		conn, err := net.Dial("unix", path)
+		if err == nil {
 			conn.Close()
 			return nil
 		}
+		lastErr = err
 		time.Sleep(20 * time.Millisecond)
 	}
-	return fmt.Errorf("timeout waiting for socket %s to accept", path)
+	return fmt.Errorf("timeout waiting for socket %s to accept: %w", path, lastErr)
 }

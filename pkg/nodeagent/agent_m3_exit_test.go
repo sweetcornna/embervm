@@ -348,8 +348,19 @@ func TestLifecycleTTLFlow(t *testing.T) {
 	if ok, err := cold.HasObject(ctx, nodeagent.KeyArtifacts(id)); err != nil || !ok {
 		t.Fatalf("artifacts.tar.zst missing from cold store: ok=%v err=%v", ok, err)
 	}
-	if ok, _ := cold.HasObject(ctx, nodeagent.KeySnapshotJSON(id)); ok {
-		t.Fatal("snapshot descriptor survived recycle")
+	// The prune runs AFTER the CAS the state poll observes (copy→CAS→prune,
+	// ADR-0004 D2) and deletes thousands of chunk objects before the
+	// descriptor — poll for its disappearance instead of racing it.
+	pruneDeadline := time.Now().Add(60 * time.Second)
+	for {
+		ok, _ := cold.HasObject(ctx, nodeagent.KeySnapshotJSON(id))
+		if !ok {
+			break
+		}
+		if time.Now().After(pruneDeadline) {
+			t.Fatal("snapshot descriptor survived recycle (prune never completed)")
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	var restored struct {
