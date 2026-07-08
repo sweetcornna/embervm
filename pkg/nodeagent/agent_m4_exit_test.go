@@ -185,14 +185,19 @@ func startClusterNode(t *testing.T, pool string, i int) *clusterNode {
 	}
 	t.Cleanup(func() { _ = exec.Command("zfs", "destroy", "-r", pool+"/"+id).Run() })
 
-	dir := t.TempDir()
+	// Everything the daemon touches lives OUTSIDE t.TempDir() and is
+	// deliberately leaked (the CI runner is ephemeral): a SIGKILLed daemon's
+	// FC/uffd children outlive it and keep writing chunk-cache files, which
+	// races testing.T's TempDir RemoveAll into "directory not empty".
+	dir, err := os.MkdirTemp("", id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sock := filepath.Join(dir, id+".sock")
-	// The jail lives OUTSIDE t.TempDir(): the jailed API socket's host path
-	// is <base>/firecracker/<uuid>/root/run/firecracker.socket, and with
-	// t.TempDir()'s long prefix it blows the 108-byte unix sun_path limit
-	// (every connect fails EINVAL while FC listens fine in-chroot).
-	// Deliberately leaked: kill -9'd daemons leave bind mounts behind, and
-	// the CI runner is ephemeral.
+	// The jail gets its own SHORT base: the jailed API socket's host path is
+	// <base>/firecracker/<uuid>/root/run/firecracker.socket, and a long
+	// prefix blows the 108-byte unix sun_path limit (every connect fails
+	// EINVAL while FC listens fine in-chroot).
 	jailBase, err := os.MkdirTemp("", "j")
 	if err != nil {
 		t.Fatal(err)
