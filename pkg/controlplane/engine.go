@@ -249,6 +249,15 @@ func (e *Engine) archiveToCold(ctx context.Context, id string) error {
 	}
 	for _, layer := range desc.DiskLayers {
 		key := nodeagent.KeyDiskDelta(id, layer)
+		// A sandbox that was cold-restored and re-archived only has its
+		// NEWEST disk deltas in L1 — earlier segments were pruned by the
+		// previous archive and still sit in the cold store. Delta streams
+		// are immutable per tag, so present-in-cold means done.
+		if ok, err := e.cold.HasObject(ctx, key); err != nil {
+			return fmt.Errorf("archive %s: probe cold disk %s: %w", id, layer, err)
+		} else if ok {
+			continue
+		}
 		if err := copyObject(ctx, e.l1, e.cold, key, key); err != nil {
 			return fmt.Errorf("archive %s: disk %s: %w", id, layer, err)
 		}
