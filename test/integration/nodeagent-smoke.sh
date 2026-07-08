@@ -54,9 +54,10 @@ export EMBERVM_SCRIPT_DIR="$ROOT/scripts"
 export EMBERVM_JAILER_BIN="$ASSETS_DIR/release-$FC_VERSION-$ARCH/jailer-$FC_VERSION-$ARCH"
 
 log "running node agent lifecycle tests (M1 raw + M2 chunked pipeline)"
-go test "$ROOT/pkg/nodeagent/" -run 'TestAgentLifecycleKVM|TestChunkedLifecycleKVM|TestJailedLifecycleKVM' -v -count=1 -timeout 20m \
+go test "$ROOT/pkg/nodeagent/" -run 'TestAgentLifecycleKVM|TestChunkedLifecycleKVM|TestJailedLifecycleKVM|TestWatchdogReapsZombiesKVM' -v -count=1 -timeout 20m \
   | tee /tmp/nodeagent-smoke.log
 # A skipped lifecycle test must never masquerade as a pass (M1 CI lesson).
 grep -q -- '--- PASS: TestAgentLifecycleKVM' /tmp/nodeagent-smoke.log
 grep -q -- '--- PASS: TestChunkedLifecycleKVM' /tmp/nodeagent-smoke.log
 grep -q -- '--- PASS: TestJailedLifecycleKVM' /tmp/nodeagent-smoke.log
+grep -q -- '--- PASS: TestWatchdogReapsZombiesKVM' /tmp/nodeagent-smoke.log

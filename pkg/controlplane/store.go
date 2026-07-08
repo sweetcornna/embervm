@@ -481,6 +481,15 @@ func (s *Store) NodeUsage(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// FailSandbox marks one active sandbox FAILED (watchdog reap write-through).
+func (s *Store) FailSandbox(ctx context.Context, id, reason string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandboxes SET state='FAILED', error=$2, updated_at=now()
+		 WHERE id=$1 AND state IN ('STARTING','RUNNING','RESUMING','PAUSING')`,
+		id, reason)
+	return err
+}
+
 // FailRunningOnNode marks a dead node's active sandboxes FAILED (their last
 // write-through snapshot remains restorable elsewhere).
 func (s *Store) FailRunningOnNode(ctx context.Context, nodeID, reason string) (int, error) {

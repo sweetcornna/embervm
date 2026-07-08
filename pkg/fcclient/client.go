@@ -68,6 +68,12 @@ type NetworkInterface struct {
 	HostDevName string `json:"host_dev_name"`
 }
 
+// Balloon is the body of PUT /balloon (pre-boot attach).
+type Balloon struct {
+	AmountMib    int  `json:"amount_mib"`
+	DeflateOnOom bool `json:"deflate_on_oom"`
+}
+
 // SnapshotCreate is the body of PUT /snapshot/create. SnapshotType defaults
 // to "Full" when empty.
 type SnapshotCreate struct {
@@ -113,6 +119,16 @@ func (c *Client) PutNetworkInterface(ctx context.Context, n NetworkInterface) er
 // InstanceStart issues the boot action.
 func (c *Client) InstanceStart(ctx context.Context) error {
 	return c.do(ctx, http.MethodPut, "/actions", map[string]string{"action_type": "InstanceStart"})
+}
+
+// PutBalloon attaches a balloon device (pre-boot only).
+func (c *Client) PutBalloon(ctx context.Context, b Balloon) error {
+	return c.do(ctx, http.MethodPut, "/balloon", b)
+}
+
+// PatchBalloon retargets the balloon of a running VM (memory reclaim).
+func (c *Client) PatchBalloon(ctx context.Context, amountMib int) error {
+	return c.do(ctx, http.MethodPatch, "/balloon", map[string]int{"amount_mib": amountMib})
 }
 
 // PatchVMState transitions a running VM, e.g. state="Paused" or "Resumed".

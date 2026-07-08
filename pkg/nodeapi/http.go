@@ -34,6 +34,7 @@ func NewServer(a Agent) http.Handler {
 	mux.HandleFunc("POST /sandboxes/{id}/restore", s.restoreSandbox)
 	mux.HandleFunc("POST /sandboxes/{id}/extract-artifacts", s.extractArtifacts)
 	mux.HandleFunc("POST /sandboxes/{id}/prewarm", s.prewarm)
+	mux.HandleFunc("POST /sandboxes/{id}/balloon", s.setBalloon)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.exec)
 	mux.HandleFunc("GET /sandboxes/{id}/health", s.health)
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.readFile)
@@ -191,6 +192,21 @@ func (s *server) prewarm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.agent.Prewarm(r.Context(), r.PathValue("id"), body.Tier); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *server) setBalloon(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TargetMiB int `json:"target_mib"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: err.Error()})
+		return
+	}
+	if err := s.agent.SetBalloon(r.Context(), r.PathValue("id"), body.TargetMiB); err != nil {
 		fail(w, err)
 		return
 	}
@@ -383,6 +399,11 @@ func (c *Client) ExtractArtifacts(ctx context.Context, sandboxID string, paths [
 func (c *Client) Prewarm(ctx context.Context, sandboxID, tier string) error {
 	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/prewarm", nil,
 		map[string]string{"tier": tier}, nil)
+}
+
+func (c *Client) SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error {
+	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/balloon", nil,
+		map[string]int{"target_mib": targetMiB}, nil)
 }
 
 func (c *Client) Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {

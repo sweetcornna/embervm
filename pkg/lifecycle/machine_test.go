@@ -76,3 +76,28 @@ func TestTerminalStates(t *testing.T) {
 		t.Error("RUNNING must not be terminal")
 	}
 }
+
+func TestMachineCAS(t *testing.T) {
+	m := New(StateRunning)
+	// CAS loses when the observed state is stale — even though the target
+	// would be a legal transition from the CURRENT state (FAILED is legal
+	// from any active state, which is exactly why the watchdog cannot use
+	// a plain To: a sandbox that moved RUNNING -> PAUSING mid-scan must
+	// not be reaped).
+	if err := m.CAS(StatePausedHot, StateFailed); err == nil {
+		t.Error("CAS with stale from-state: want error")
+	}
+	if m.State() != StateRunning {
+		t.Errorf("state after lost CAS = %s, want RUNNING", m.State())
+	}
+	if err := m.CAS(StateRunning, StateFailed); err != nil {
+		t.Fatalf("CAS(RUNNING, FAILED): %v", err)
+	}
+	if m.State() != StateFailed {
+		t.Errorf("state after won CAS = %s, want FAILED", m.State())
+	}
+	// A CAS to an illegal target is rejected even with the right from.
+	if err := m.CAS(StateFailed, StateRunning); err == nil {
+		t.Error("CAS(FAILED, RUNNING): want error (illegal edge)")
+	}
+}

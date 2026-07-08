@@ -69,6 +69,7 @@ type Agent struct {
 	localStore *chunkstore.Dir    // node-local chunk cache (chunked mode)
 	l1         chunkstore.Backend // optional L1 object store (EMBERVM_L1_*)
 	cold       chunkstore.Backend // optional cold-tier store (EMBERVM_COLD_*)
+	failed     []string           // watchdog-reaped ids, drained by Healthz
 }
 
 var _ nodeapi.Agent = (*Agent)(nil)
@@ -127,6 +128,10 @@ func New(cfg Config) (nodeapi.Agent, error) {
 		if ok {
 			a.cold = cold
 		}
+	}
+	if cfg.WatchdogInterval > 0 {
+		// Process-lifetime loop, like the daemon that owns the agent.
+		a.StartWatchdog(context.Background(), cfg.WatchdogInterval)
 	}
 	return a, nil
 }
@@ -274,6 +279,11 @@ func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
 		},
 		func() error {
 			return c.PutDrive(ctx, fcclient.Drive{DriveID: "data", PathOnHost: a.fcDrivePath(sb, sb.dataRaw)})
+		},
+		func() error {
+			// Balloon device: 0 = nothing reclaimed until SetBalloon asks
+			// (M4 memory oversell); survives snapshots.
+			return c.PutBalloon(ctx, fcclient.Balloon{AmountMib: 0, DeflateOnOom: true})
 		},
 		func() error {
 			return c.PutNetworkInterface(ctx, fcclient.NetworkInterface{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: "tap0"})
@@ -500,16 +510,49 @@ func (a *Agent) Healthz(_ context.Context) (nodeapi.NodeHealth, error) {
 			used += sb.memMiB
 		}
 	}
-	return nodeapi.NodeHealth{
-		CapacityMiB: a.cfg.CapacityMiB,
-		UsedMiB:     used,
-		Sandboxes:   len(a.sbx),
-	}, nil
+	h := nodeapi.NodeHealth{
+		CapacityMiB:     a.cfg.CapacityMiB,
+		UsedMiB:         used,
+		Sandboxes:       len(a.sbx),
+		FailedSandboxes: a.failed,
+	}
+	a.failed = nil // reported once; the control plane owns it now
+	return h, nil
+}
+
+// SetBalloon retargets a running sandbox's balloon device.
+func (a *Agent) SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return err
+	}
+	if st := sb.machine.State(); st != lifecycle.StateRunning {
+		return fmt.Errorf("balloon %s: state %s, want RUNNING", sandboxID, st)
+	}
+	return fcclient.New(a.fcAPISock(sb)).PatchBalloon(ctx, targetMiB)
 }
 
 // WorkDirOf returns a sandbox's runtime directory (tests and debugging).
 func (a *Agent) WorkDirOf(sandboxID string) string {
 	return filepath.Join(a.cfg.WorkDir, sandboxID)
+}
+
+// PidsOf returns a sandbox's Firecracker and uffd handler pids (0 = no such
+// process); tests kill them behind the agent's back to exercise the watchdog.
+func (a *Agent) PidsOf(sandboxID string) (fcPid, uffdPid int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	sb, ok := a.sbx[sandboxID]
+	if !ok {
+		return 0, 0
+	}
+	if sb.fc != nil && sb.fc.Process != nil {
+		fcPid = sb.fc.Process.Pid
+	}
+	if sb.uffd != nil && sb.uffd.Process != nil {
+		uffdPid = sb.uffd.Process.Pid
+	}
+	return fcPid, uffdPid
 }
 
 func (a *Agent) get(id string) (*sandbox, error) {

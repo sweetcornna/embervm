@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/controlplane"
@@ -71,6 +72,7 @@ func runDev(args []string) {
 		uffdBin     = fs.String("uffd-handler", "uffd-handler", "uffd handler binary")
 		guestdBin   = fs.String("guestd-bin", "", "guestd binary to inject into templates")
 		restoreMode = fs.String("restore-mode", "prefetch", "uffd restore mode: prefetch|lazy|file")
+		watchdog    = fs.Duration("watchdog-interval", 5*time.Second, "zombie-reaper scan interval (0 disables)")
 	)
 	_ = fs.Parse(args)
 
@@ -93,14 +95,15 @@ func runDev(args []string) {
 	}
 
 	agent, err := nodeagent.New(nodeagent.Config{
-		Storage:        backend,
-		Pool:           pool,
-		WorkDir:        *workDir,
-		KernelPath:     *kernel,
-		FCBin:          *fcBin,
-		UffdHandlerBin: *uffdBin,
-		GuestdBin:      *guestdBin,
-		RestoreMode:    *restoreMode,
+		Storage:          backend,
+		Pool:             pool,
+		WorkDir:          *workDir,
+		KernelPath:       *kernel,
+		FCBin:            *fcBin,
+		UffdHandlerBin:   *uffdBin,
+		GuestdBin:        *guestdBin,
+		RestoreMode:      *restoreMode,
+		WatchdogInterval: *watchdog,
 	})
 	if err != nil {
 		log.Fatalf("embervm dev: %v", err)

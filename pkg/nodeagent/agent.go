@@ -6,6 +6,8 @@
 package nodeagent
 
 import (
+	"time"
+
 	"github.com/embervm/embervm/pkg/netns"
 	"github.com/embervm/embervm/pkg/storage"
 )
@@ -46,4 +48,10 @@ type Config struct {
 	// BootExtraArgs is appended to the guest kernel command line; defaults to
 	// the docs/zh/04 §5 microVM args.
 	BootExtraArgs string
+
+	// WatchdogInterval enables the zombie reaper (watchdog_linux.go) when
+	// > 0: RUNNING sandboxes whose Firecracker or uffd handler died behind
+	// the agent's back are force-FAILED and reported via Healthz. 0 = off
+	// (unit tests drive reapZombies directly).
+	WatchdogInterval time.Duration
 }

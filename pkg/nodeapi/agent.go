@@ -27,6 +27,9 @@ type NodeHealth struct {
 	CapacityMiB int `json:"capacity_mib"`
 	UsedMiB     int `json:"used_mib"`
 	Sandboxes   int `json:"sandboxes"`
+	// FailedSandboxes are ids the node's watchdog reaped since they were
+	// last reported; the scheduler writes them through to PostgreSQL.
+	FailedSandboxes []string `json:"failed_sandboxes,omitempty"`
 }
 
 // SandboxStatus is the node's view of a sandbox.
@@ -66,6 +69,8 @@ type Agent interface {
 	// Prewarm pulls the sandbox's working-set chunks from the tier's store
 	// into the node-local cache ahead of a predicted wake.
 	Prewarm(ctx context.Context, sandboxID, tier string) error
+	// SetBalloon retargets a running sandbox's balloon (memory reclaim).
+	SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error
 
 	Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error)
 	Health(ctx context.Context, sandboxID string) (*guestapi.HealthResponse, error)

@@ -15,13 +15,16 @@ type schedMockAgent struct {
 	cpMockAgent
 	capacity int
 	dead     atomic.Bool
+	failed   []string // drained by Healthz, like the real agent's watchdog list
 }
 
 func (m *schedMockAgent) Healthz(context.Context) (nodeapi.NodeHealth, error) {
 	if m.dead.Load() {
 		return nodeapi.NodeHealth{}, errors.New("connection refused")
 	}
-	return nodeapi.NodeHealth{CapacityMiB: m.capacity}, nil
+	h := nodeapi.NodeHealth{CapacityMiB: m.capacity, FailedSandboxes: m.failed}
+	m.failed = nil
+	return h, nil
 }
 
 func newCluster(t *testing.T, capacities map[string]int) (*Store, *Scheduler, map[string]*schedMockAgent) {
@@ -176,5 +179,47 @@ func TestSchedulerRecoversAfterHeartbeat(t *testing.T) {
 	}
 	if len(nodes) != 1 || nodes[0].State != "up" {
 		t.Fatalf("node after recovery = %+v, want up", nodes)
+	}
+}
+
+func TestSchedulerWatchdogWriteThrough(t *testing.T) {
+	s, sched, agents := newCluster(t, map[string]int{"n1": 4096})
+	ctx := context.Background()
+
+	victim := pausedSandbox(t, s, "RUNNING", time.Second)
+	if err := s.SetSandboxNode(ctx, victim, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	// The node's watchdog reaped it; the next heartbeat carries the report
+	// and the scheduler writes it through to PostgreSQL.
+	agents["n1"].failed = []string{victim + ": firecracker process died"}
+	if err := sched.pollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := s.GetSandbox(ctx, victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.State != "FAILED" || sb.Error != "watchdog: firecracker process died" {
+		t.Fatalf("victim state=%s error=%q, want FAILED / watchdog cause", sb.State, sb.Error)
+	}
+	// Reaped ≠ terminal: recovery is the ordinary FAILED -> RESUMING CAS.
+	if err := s.TransitionSandbox(ctx, victim, "FAILED", "RESUMING", ""); err != nil {
+		t.Fatalf("FAILED->RESUMING CAS: %v", err)
+	}
+
+	// A stale report must not clobber a sandbox that has since paused —
+	// FailSandbox only touches active states.
+	settled := pausedSandbox(t, s, "PAUSED_WARM", time.Second)
+	agents["n1"].failed = []string{settled + ": uffd handler died"}
+	if err := sched.pollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sb, err = s.GetSandbox(ctx, settled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.State != "PAUSED_WARM" {
+		t.Fatalf("settled sandbox state = %s, want PAUSED_WARM (untouched)", sb.State)
 	}
 }

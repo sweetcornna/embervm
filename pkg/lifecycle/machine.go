@@ -5,7 +5,10 @@
 // place so every caller (node agent, control plane) agrees on what is legal.
 package lifecycle
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // State is a sandbox lifecycle state.
 type State string
@@ -76,8 +79,11 @@ func Validate(from, to State) error {
 	return fmt.Errorf("illegal lifecycle transition %s -> %s", from, to)
 }
 
-// Machine tracks one sandbox's current state.
+// Machine tracks one sandbox's current state. It carries its own lock so
+// concurrent observers (the M4 watchdog goroutine vs the lifecycle verbs)
+// get a consistent view without sharing the agent-wide mutex.
 type Machine struct {
+	mu    sync.Mutex
 	state State
 }
 
@@ -85,12 +91,36 @@ type Machine struct {
 func New(initial State) *Machine { return &Machine{state: initial} }
 
 // State returns the current state.
-func (m *Machine) State() State { return m.state }
+func (m *Machine) State() State {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state
+}
 
 // To validates and applies a transition, leaving the state unchanged on
 // error.
 func (m *Machine) To(to State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err := Validate(m.state, to); err != nil {
+		return err
+	}
+	m.state = to
+	return nil
+}
+
+// CAS applies from→to only if the machine is still in `from`. Destructive
+// observers (the watchdog reaping a zombie it saw RUNNING) must use this
+// rather than To: FAILED is legal from every active state, so a plain To
+// would also hit a sandbox that has since moved on to PAUSING/STOPPING
+// under a live actor.
+func (m *Machine) CAS(from, to State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state != from {
+		return fmt.Errorf("lifecycle CAS lost: state is %s, not %s", m.state, from)
+	}
+	if err := Validate(from, to); err != nil {
 		return err
 	}
 	m.state = to

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,6 +137,14 @@ func (s *Scheduler) pollOnce(ctx context.Context) error {
 		s.mu.Unlock()
 		if err := s.store.TouchNode(ctx, id); err != nil {
 			return err
+		}
+		for _, f := range h.FailedSandboxes {
+			sbID, cause, _ := strings.Cut(f, ": ")
+			if err := s.store.FailSandbox(ctx, sbID, "watchdog: "+cause); err != nil {
+				log.Printf("scheduler: record watchdog failure %s: %v", sbID, err)
+			} else {
+				log.Printf("scheduler: node %s watchdog reaped %s (%s)", id, sbID, cause)
+			}
 		}
 		if h.CapacityMiB > 0 {
 			if err := s.store.UpsertNode(ctx, Node{ID: id, CapacityMiB: h.CapacityMiB}); err != nil {

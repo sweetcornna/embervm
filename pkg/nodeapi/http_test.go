@@ -22,7 +22,8 @@ type mockAgent struct {
 		mode fs.FileMode
 		data []byte
 	}
-	failStop bool
+	lastBalloon int
+	failStop    bool
 }
 
 func (m *mockAgent) BuildTemplate(_ context.Context, id, image string) error { return nil }
@@ -57,6 +58,10 @@ func (m *mockAgent) ExtractArtifacts(_ context.Context, id string, paths []strin
 	return nil
 }
 func (m *mockAgent) Prewarm(_ context.Context, id, tier string) error { return nil }
+func (m *mockAgent) SetBalloon(_ context.Context, id string, mib int) error {
+	m.lastBalloon = mib
+	return nil
+}
 
 func (m *mockAgent) Exec(_ context.Context, id string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {
 	m.lastExec = req
@@ -159,6 +164,13 @@ func TestNodeAPIRoundtrip(t *testing.T) {
 	}
 	if m.lastWrite.path != "/tmp/x" || m.lastWrite.mode != 0o600 || string(m.lastWrite.data) != "payload" {
 		t.Errorf("server saw write %+v", m.lastWrite)
+	}
+
+	if err := c.SetBalloon(ctx, "sbx1", 128); err != nil {
+		t.Fatalf("SetBalloon: %v", err)
+	}
+	if m.lastBalloon != 128 {
+		t.Errorf("server saw balloon target %d, want 128", m.lastBalloon)
 	}
 
 	if err := c.StopSandbox(ctx, "sbx1"); err != nil {

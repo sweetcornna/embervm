@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/embervm/embervm/pkg/netns"
 	"github.com/embervm/embervm/pkg/nodeagent"
@@ -37,6 +38,7 @@ func main() {
 		uffdBin     = flag.String("uffd-handler", "uffd-handler", "uffd handler binary")
 		guestdBin   = flag.String("guestd-bin", "", "guestd binary to inject into templates")
 		restoreMode = flag.String("restore-mode", "prefetch", "uffd restore mode: prefetch|lazy|file")
+		watchdog    = flag.Duration("watchdog-interval", 5*time.Second, "zombie-reaper scan interval (0 disables)")
 	)
 	flag.Parse()
 
@@ -58,14 +60,15 @@ func main() {
 	}
 
 	agent, err := nodeagent.New(nodeagent.Config{
-		Storage:        backend,
-		Pool:           p,
-		WorkDir:        *workDir,
-		KernelPath:     *kernel,
-		FCBin:          *fcBin,
-		UffdHandlerBin: *uffdBin,
-		GuestdBin:      *guestdBin,
-		RestoreMode:    *restoreMode,
+		Storage:          backend,
+		Pool:             p,
+		WorkDir:          *workDir,
+		KernelPath:       *kernel,
+		FCBin:            *fcBin,
+		UffdHandlerBin:   *uffdBin,
+		GuestdBin:        *guestdBin,
+		RestoreMode:      *restoreMode,
+		WatchdogInterval: *watchdog,
 	})
 	if err != nil {
 		log.Fatalf("nodeagent: %v", err)
