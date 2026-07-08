@@ -31,26 +31,30 @@ const S3EnvPrefix = "EMBERVM_L1_"
 // S3FromEnv builds a config from EMBERVM_L1_* variables. It returns
 // (zero, false, nil) when EMBERVM_L1_ENDPOINT is unset — L1 is optional.
 func S3FromEnv() (S3Config, bool, error) {
-	endpoint := os.Getenv(S3EnvPrefix + "ENDPOINT")
+	return s3ConfigFromEnv(S3EnvPrefix)
+}
+
+func s3ConfigFromEnv(prefix string) (S3Config, bool, error) {
+	endpoint := os.Getenv(prefix + "ENDPOINT")
 	if endpoint == "" {
 		return S3Config{}, false, nil
 	}
 	cfg := S3Config{
 		Endpoint:  endpoint,
-		Bucket:    os.Getenv(S3EnvPrefix + "BUCKET"),
-		Prefix:    os.Getenv(S3EnvPrefix + "PREFIX"),
-		AccessKey: os.Getenv(S3EnvPrefix + "ACCESS_KEY"),
-		SecretKey: os.Getenv(S3EnvPrefix + "SECRET_KEY"),
+		Bucket:    os.Getenv(prefix + "BUCKET"),
+		Prefix:    os.Getenv(prefix + "PREFIX"),
+		AccessKey: os.Getenv(prefix + "ACCESS_KEY"),
+		SecretKey: os.Getenv(prefix + "SECRET_KEY"),
 	}
-	if v := os.Getenv(S3EnvPrefix + "SECURE"); v != "" {
+	if v := os.Getenv(prefix + "SECURE"); v != "" {
 		secure, err := strconv.ParseBool(v)
 		if err != nil {
-			return S3Config{}, false, fmt.Errorf("chunkstore: bad %sSECURE %q: %w", S3EnvPrefix, v, err)
+			return S3Config{}, false, fmt.Errorf("chunkstore: bad %sSECURE %q: %w", prefix, v, err)
 		}
 		cfg.Secure = secure
 	}
 	if cfg.Bucket == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
-		return S3Config{}, false, fmt.Errorf("chunkstore: %sENDPOINT is set but BUCKET/ACCESS_KEY/SECRET_KEY are incomplete", S3EnvPrefix)
+		return S3Config{}, false, fmt.Errorf("chunkstore: %sENDPOINT is set but BUCKET/ACCESS_KEY/SECRET_KEY are incomplete", prefix)
 	}
 	return cfg, true, nil
 }
