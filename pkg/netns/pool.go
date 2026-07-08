@@ -136,3 +136,32 @@ func (l Lease) Release() {
 		l.pool.release(l.ID)
 	}
 }
+
+// VethNet is the slot's root-ns veth subnet (setup-network.sh: 10.200.<ID>.0/30).
+func (l Lease) VethNet() string { return fmt.Sprintf("10.200.%d.0/30", l.ID) }
+
+// BlockEgress cuts the guest off from the world: a root-ns FORWARD drop on
+// the slot's veth subnet, inserted ahead of the pool's ACCEPT rules.
+// Host→guest dialing is unaffected — DialContext enters the namespace and
+// never crosses root-ns FORWARD. The rule carries the slot's embervm-<ID>
+// comment so teardown-network.sh sweeps it with the rest.
+func (l Lease) BlockEgress(ctx context.Context) error {
+	_, err := l.pool.run(ctx, "iptables", egressRule("-I", "FORWARD", "1", l)...)
+	return err
+}
+
+// UnblockEgress removes the BlockEgress rule. Exact-spec delete: the slot's
+// NAT/FORWARD ACCEPT rules share the comment but not the spec.
+func (l Lease) UnblockEgress(ctx context.Context) error {
+	_, err := l.pool.run(ctx, "iptables", egressRule("-D", "FORWARD", "", l)...)
+	return err
+}
+
+func egressRule(op, chain, pos string, l Lease) []string {
+	args := []string{op, chain}
+	if pos != "" {
+		args = append(args, pos)
+	}
+	return append(args, "-s", l.VethNet(), "-j", "DROP",
+		"-m", "comment", "--comment", fmt.Sprintf("embervm-%d", l.ID))
+}

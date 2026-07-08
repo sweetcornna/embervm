@@ -14,6 +14,7 @@ import (
 	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/lifecycle"
 	"github.com/embervm/embervm/pkg/memsnap"
+	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/nodeagent"
 	"github.com/embervm/embervm/pkg/nodeapi"
 	"github.com/embervm/embervm/pkg/prewarm"
@@ -139,6 +140,7 @@ func (e *Engine) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			if err := e.tickOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				metrics.EngineTickErrors.Inc()
 				log.Printf("lifecycle engine: %v", err)
 			}
 		}

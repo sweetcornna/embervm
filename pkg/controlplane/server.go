@@ -7,7 +7,9 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
+	"net/http/httputil"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +19,7 @@ import (
 	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/guestapi"
 	"github.com/embervm/embervm/pkg/lifecycle"
+	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/nodeagent"
 	"github.com/embervm/embervm/pkg/nodeapi"
 )
@@ -89,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 
 	v0 := r.Group("/v0", s.tokens.Auth())
 	v0.POST("/templates", s.createTemplate)
@@ -107,6 +111,8 @@ func (s *Server) Handler() http.Handler {
 	v0.GET("/sandboxes/:id/storage", s.sandboxStorage)
 	v0.GET("/storage-report", s.storageReportAll)
 	v0.POST("/sandboxes/:id/restore-artifacts", s.restoreArtifacts)
+
+	v0.Any("/sandboxes/:id/proxy/:port/*path", s.proxyGuest)
 
 	v0.POST("/sandboxes/:id/exec", s.execSandbox)
 	v0.GET("/sandboxes/:id/files", s.readFile)
@@ -227,6 +233,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		// ArtifactPaths are preserved when the sandbox is RECYCLED
 		// (M3 selective restore); empty keeps nothing.
 		ArtifactPaths []string `json:"artifact_paths"`
+		Egress        string   `json:"egress"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		abortErr(c, http.StatusBadRequest, err)
@@ -282,6 +289,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 	st, err := agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
 		SandboxID: id, TemplateID: body.TemplateID,
 		VCPUs: body.VCPUs, MemoryMiB: body.MemoryMiB, DataDiskGiB: body.DataDiskGiB,
+		Egress: body.Egress,
 	})
 	if err != nil {
 		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
@@ -397,6 +405,58 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 	}
 	sb.State = st.State
 	c.JSON(http.StatusOK, sb)
+}
+
+// proxyGuest is the M4 gateway: authenticated, owner-scoped forwarding of
+// any HTTP(S)/WebSocket traffic to a guest port. In-proc agents proxy
+// straight into the netns; split-mode agents add a UDS hop.
+func (s *Server) proxyGuest(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	port, err := strconv.Atoi(c.Param("port"))
+	if err != nil || port <= 0 || port > 65535 {
+		abortErr(c, http.StatusBadRequest, errors.New("bad port"))
+		return
+	}
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
+		return
+	}
+
+	var handler http.Handler
+	switch g := agent.(type) {
+	case nodeapi.GuestDialer: // in-proc: dial the netns directly
+		handler = &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.Out.URL.Scheme = "http"
+				pr.Out.URL.Host = "guest"
+				pr.Out.URL.Path = c.Param("path")
+			},
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return g.DialGuest(ctx, sb.ID, port)
+				},
+			},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(err.Error()))
+			},
+		}
+	case nodeapi.GuestProxier: // split mode: hop over the node's UDS
+		inner := g.GuestProxy(sb.ID, port)
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = c.Param("path")
+			inner.ServeHTTP(w, r2)
+		})
+	default:
+		abortErr(c, http.StatusNotImplemented, errors.New("node does not support guest proxying"))
+		return
+	}
+	handler.ServeHTTP(c.Writer, c.Request)
+	metrics.ProxyRequests.WithLabelValues(strconv.Itoa(c.Writer.Status()/100) + "xx").Inc()
 }
 
 // sandboxStorage reports one sandbox's storage footprint by tier.

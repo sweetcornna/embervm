@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/nodeapi"
 )
 
@@ -135,6 +136,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 // pollOnce health-checks every registered node, updating liveness and
 // evicting nodes past the miss threshold. Split out for tests.
 func (s *Scheduler) pollOnce(ctx context.Context) error {
+	up := 0
+	defer func() { metrics.NodesUp.Set(float64(up)) }()
 	for _, id := range s.registry.IDs() {
 		agent, err := s.registry.Agent(id)
 		if err != nil {
@@ -147,6 +150,7 @@ func (s *Scheduler) pollOnce(ctx context.Context) error {
 			s.recordMiss(ctx, id, err)
 			continue
 		}
+		up++
 		s.mu.Lock()
 		s.misses[id] = 0
 		s.mu.Unlock()

@@ -9,6 +9,8 @@ package nodeapi
 import (
 	"context"
 	"io/fs"
+	"net"
+	"net/http"
 
 	"github.com/embervm/embervm/pkg/guestapi"
 )
@@ -20,6 +22,11 @@ type CreateSandboxRequest struct {
 	VCPUs       int    `json:"vcpus"`
 	MemoryMiB   int    `json:"memory_mib"`
 	DataDiskGiB int    `json:"data_disk_gib"`
+	// Egress controls the sandbox's outbound network: "nat" (default,
+	// MASQUERADE) or "none" (no internet — the guest reaches only the
+	// host-side proxy targets). The full zero-trust L7 egress proxy is a
+	// deferred product subsystem (ADR-0005).
+	Egress string `json:"egress,omitempty"`
 }
 
 // NodeHealth is a node's capacity heartbeat (M4 scheduler polling).
@@ -41,6 +48,19 @@ type SandboxStatus struct {
 	State     string `json:"state"`      // pkg/lifecycle state name
 	GuestAddr string `json:"guest_addr"` // e.g. "172.16.0.2:7777", reachable via the node
 	Netns     string `json:"netns"`
+}
+
+// GuestDialer is the optional data-plane contract behind the M4 gateway:
+// dialing a guest port requires entering the sandbox netns, so only the
+// concrete node agent implements it. The nodeapi transport bridges it as a
+// reverse proxy hop; nodeapi.Client satisfies GuestProxier instead.
+type GuestDialer interface {
+	DialGuest(ctx context.Context, sandboxID string, port int) (net.Conn, error)
+}
+
+// GuestProxier serves HTTP(S)/WebSocket traffic destined for a guest port.
+type GuestProxier interface {
+	GuestProxy(sandboxID string, port int) http.Handler
 }
 
 // Agent is everything the control plane can ask a node to do. Guest

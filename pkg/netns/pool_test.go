@@ -106,6 +106,40 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestLeaseEgressRules(t *testing.T) {
+	f := &fakeRunner{}
+	p := NewPoolAt("/scripts", 40, 1) // non-zero base: the rule must use the slot id
+	p.run = f.run
+	_ = p.Setup(context.Background())
+	l, err := p.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if l.VethNet() != "10.200.40.0/30" {
+		t.Errorf("VethNet = %q", l.VethNet())
+	}
+
+	f.calls = nil
+	if err := l.BlockEgress(context.Background()); err != nil {
+		t.Fatalf("BlockEgress: %v", err)
+	}
+	// Inserted at position 1 (ahead of the pool's ACCEPT rules) and tagged
+	// embervm-<ID> so teardown-network.sh sweeps it.
+	want := "iptables -I FORWARD 1 -s 10.200.40.0/30 -j DROP -m comment --comment embervm-40"
+	if !contains(f.calls, want) {
+		t.Errorf("missing %q; calls=%v", want, f.calls)
+	}
+
+	f.calls = nil
+	if err := l.UnblockEgress(context.Background()); err != nil {
+		t.Fatalf("UnblockEgress: %v", err)
+	}
+	want = "iptables -D FORWARD -s 10.200.40.0/30 -j DROP -m comment --comment embervm-40"
+	if !contains(f.calls, want) {
+		t.Errorf("missing %q; calls=%v", want, f.calls)
+	}
+}
+
 func contains(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {

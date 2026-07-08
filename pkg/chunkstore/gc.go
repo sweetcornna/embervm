@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/embervm/embervm/pkg/metrics"
 )
 
 // GCResult reports one mark-and-sweep pass.
@@ -69,6 +71,7 @@ func GC(ctx context.Context, b ListingBackend, grace time.Duration) (GCResult, e
 		}
 		res.SweptChunks++
 	}
+	metrics.ChunkOps.WithLabelValues("gc_sweep").Add(float64(res.SweptChunks))
 	return res, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/embervm/embervm/pkg/lifecycle"
+	"github.com/embervm/embervm/pkg/metrics"
 )
 
 // The G5 zombie reaper. A dead Firecracker with a live uffd handler (or the
@@ -96,9 +97,11 @@ func (a *Agent) reap(ctx context.Context, sb *sandbox, cause string) {
 		a.teardownJail(sb)
 	}
 	a.removeCgroup(sb.id)
+	a.clearEgress(ctx, sb)
 	sb.lease.Release()
 	_ = os.RemoveAll(sb.dir)
 	_ = a.cfg.Storage.DestroySandbox(ctx, sb.id)
+	metrics.WatchdogReaps.Inc()
 }
 
 // childAlive reports whether our child pid is still running. A signal-0

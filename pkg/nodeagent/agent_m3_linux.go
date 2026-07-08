@@ -52,6 +52,7 @@ func (a *Agent) ReleaseLocal(ctx context.Context, sandboxID string) error {
 		a.teardownJail(sb)
 	}
 	a.removeCgroup(sb.id)
+	a.clearEgress(ctx, sb)
 	sb.lease.Release()
 	if err := a.cfg.Storage.DestroySandbox(ctx, sandboxID); err != nil {
 		return fmt.Errorf("release %s: destroy dataset: %w", sandboxID, err)

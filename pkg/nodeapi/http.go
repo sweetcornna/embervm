@@ -9,8 +9,10 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/embervm/embervm/pkg/guestapi"
 )
@@ -39,7 +41,46 @@ func NewServer(a Agent) http.Handler {
 	mux.HandleFunc("GET /sandboxes/{id}/health", s.health)
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.readFile)
 	mux.HandleFunc("PUT /sandboxes/{id}/files", s.writeFile)
+	if gd, ok := a.(GuestDialer); ok {
+		// Gateway data path: any method, any subpath, WebSocket-transparent
+		// (httputil.ReverseProxy passes Upgrade through).
+		mux.Handle("/sandboxes/{id}/guest/{port}/", &guestProxy{dial: gd.DialGuest})
+	}
 	return mux
+}
+
+// guestProxy reverse-proxies into the sandbox netns.
+type guestProxy struct {
+	dial func(ctx context.Context, sandboxID string, port int) (net.Conn, error)
+}
+
+func (g *guestProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	port, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil || port <= 0 || port > 65535 {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: "bad port"})
+		return
+	}
+	prefix := "/sandboxes/" + id + "/guest/" + r.PathValue("port")
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = "guest"
+			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, prefix)
+			if pr.Out.URL.Path == "" {
+				pr.Out.URL.Path = "/"
+			}
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return g.dial(ctx, id, port)
+			},
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			writeJSON(w, http.StatusBadGateway, guestapi.ErrorResponse{Error: err.Error()})
+		},
+	}
+	proxy.ServeHTTP(w, r)
 }
 
 type server struct{ agent Agent }
@@ -400,6 +441,22 @@ func (c *Client) Prewarm(ctx context.Context, sandboxID, tier string) error {
 	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/prewarm", nil,
 		map[string]string{"tier": tier}, nil)
 }
+
+// GuestProxy forwards guest-port traffic to the node daemon's proxy hop
+// over the unix socket (the second hop dials the netns there).
+func (c *Client) GuestProxy(sandboxID string, port int) http.Handler {
+	prefix := "/sandboxes/" + sandboxID + "/guest/" + strconv.Itoa(port)
+	return &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = "node"
+			pr.Out.URL.Path = prefix + pr.In.URL.Path
+		},
+		Transport: c.hc.Transport,
+	}
+}
+
+var _ GuestProxier = (*Client)(nil)
 
 func (c *Client) SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error {
 	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/balloon", nil,

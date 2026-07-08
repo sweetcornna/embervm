@@ -31,6 +31,10 @@ type SnapshotDescriptor struct {
 	// restoring node must materialize that sandbox's chain first (GUID
 	// lineage).
 	DiskOrigin *DiskOrigin `json:"disk_origin,omitempty"`
+	// Egress is the sandbox's outbound-network policy ("nat"/"none"; M4 D8).
+	// It rides the descriptor so a "none" sandbox cannot regain internet by
+	// being tiered out and restored on another node.
+	Egress string `json:"egress,omitempty"`
 }
 
 // DiskOrigin names a sandbox-snapshot clone base.

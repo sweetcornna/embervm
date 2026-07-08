@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/netns"
 	"github.com/embervm/embervm/pkg/nodeagent"
 	"github.com/embervm/embervm/pkg/nodeapi"
@@ -31,6 +32,7 @@ func main() {
 		pool        = flag.String("pool", "embervm", "ZFS pool for sandbox datasets")
 		plainRoot   = flag.String("plain-root", "", "use a plain-directory storage backend rooted here instead of ZFS")
 		netnsPool   = flag.Int("netns-pool", 24, "number of pre-created netns slots")
+		netnsBase   = flag.Int("netns-base", 0, "first netns slot id (multiple daemons on one host partition the ember<N> range)")
 		scriptDir   = flag.String("script-dir", "scripts", "directory containing setup/teardown-network.sh")
 		workDir     = flag.String("work-dir", "/var/lib/embervm/work", "per-sandbox runtime state directory")
 		kernel      = flag.String("kernel", "", "guest kernel (vmlinux) path")
@@ -53,7 +55,7 @@ func main() {
 		backend = storage.NewZFSBackend(*pool)
 	}
 
-	p := netns.NewPool(*scriptDir, *netnsPool)
+	p := netns.NewPoolAt(*scriptDir, *netnsBase, *netnsPool)
 	ctx := context.Background()
 	if err := p.Setup(ctx); err != nil {
 		log.Fatalf("nodeagent: netns pool setup: %v", err)
@@ -82,7 +84,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("nodeagent: listen %s: %v", *socket, err)
 	}
-	srv := &http.Server{Handler: nodeapi.NewServer(agent)}
+	// /metrics rides the node socket (curl --unix-socket; the transport mux
+	// stays metrics-free).
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	mux.Handle("/", nodeapi.NewServer(agent))
+	srv := &http.Server{Handler: mux}
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)

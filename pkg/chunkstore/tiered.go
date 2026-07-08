@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/embervm/embervm/pkg/metrics"
 )
 
 // Tiered reads local-first with a remote (L1) fallback and writes fetched
@@ -30,6 +32,7 @@ func (t Tiered) Get(ctx context.Context, hash string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	defer remote.Close()
+	metrics.ChunkOps.WithLabelValues("remote_get").Inc()
 	data, err := io.ReadAll(remote)
 	if err != nil {
 		return nil, fmt.Errorf("chunk %s: read remote: %w", hash, err)

@@ -6,6 +6,8 @@ import (
 	"io"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/embervm/embervm/pkg/metrics"
 )
 
 // DefaultParallel bounds concurrent chunk transfers (并行上传下载,
@@ -65,6 +67,8 @@ func (c Copier) Copy(ctx context.Context, hashes []string) (int, error) {
 	for range copied {
 		n++
 	}
+	metrics.ChunkOps.WithLabelValues("put").Add(float64(n))
+	metrics.ChunkOps.WithLabelValues("dedup_hit").Add(float64(len(hashes) - n))
 	return n, nil
 }
 

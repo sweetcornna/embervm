@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/embervm/embervm/pkg/metrics"
 )
 
 //go:embed migrations/*.sql
@@ -295,7 +297,11 @@ func (s *Store) SetSandboxState(ctx context.Context, id, from, to, netns, errMsg
 		id, from, to); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	metrics.Transitions.WithLabelValues(from, to).Inc()
+	return nil
 }
 
 // TransitionSandbox is the compare-and-swap state change the lifecycle
@@ -324,7 +330,11 @@ func (s *Store) TransitionSandbox(ctx context.Context, id, from, to, errMsg stri
 		id, from, to); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	metrics.Transitions.WithLabelValues(from, to).Inc()
+	return nil
 }
 
 // ListTransitionDue returns sandboxes sitting in `state` since before

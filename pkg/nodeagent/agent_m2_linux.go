@@ -18,6 +18,7 @@ import (
 	"github.com/embervm/embervm/pkg/fcclient"
 	"github.com/embervm/embervm/pkg/lifecycle"
 	"github.com/embervm/embervm/pkg/memsnap"
+	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/nodeapi"
 	"github.com/embervm/embervm/pkg/storage"
 )
@@ -181,6 +182,7 @@ func (a *Agent) pushL1(ctx context.Context, sb *sandbox, m *memsnap.Manifest, la
 		DiskLayers:    sb.diskLayers,
 		SnapSeq:       sb.snapCount,
 		DiskOrigin:    sb.diskOrigin,
+		Egress:        sb.egress,
 	}
 	for _, lm := range sb.layers {
 		desc.Layers = append(desc.Layers, lm.LayerID)
@@ -214,6 +216,7 @@ func (a *Agent) pushTemplateL1(ctx context.Context, templateID string) error {
 // resume with a cold local chunk cache. Cross-node placement stays
 // test/scheduler driven until M4.
 func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nodeapi.SandboxStatus, error) {
+	restoreStart := time.Now()
 	src, err := a.tierStore(tier)
 	if err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: %w", sandboxID, err)
@@ -293,6 +296,7 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		snapCount:   snapSeq,
 		diskLayers:  diskLayers,
 		diskOrigin:  desc.DiskOrigin,
+		egress:      desc.Egress,
 		restoreTier: tier,
 		// A cold snapshot's chunks live only in the cold store; the next
 		// pause roots a fresh Full chain back in L1 (ADR-0004 D7).
@@ -328,12 +332,16 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		return nodeapi.SandboxStatus{}, err
 	}
 	sb.lease = lease
+	if err := a.applyEgress(ctx, sb); err != nil {
+		a.cleanup(ctx, sb)
+		return nodeapi.SandboxStatus{}, fmt.Errorf("apply egress policy: %w", err)
+	}
 
 	a.mu.Lock()
 	a.sbx[sandboxID] = sb
 	a.mu.Unlock()
 
-	st, err := a.ResumeSandbox(ctx, sandboxID)
+	st, err := a.resume(ctx, sandboxID)
 	if err != nil {
 		a.mu.Lock()
 		delete(a.sbx, sandboxID)
@@ -341,6 +349,7 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		a.cleanup(ctx, sb)
 		return nodeapi.SandboxStatus{}, err
 	}
+	metrics.RestoreSeconds.WithLabelValues(tier).Observe(time.Since(restoreStart).Seconds())
 	return st, nil
 }
 

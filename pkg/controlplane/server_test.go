@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -231,5 +234,62 @@ func TestServerAuthRequired(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("healthz = %d, want 200", w.Code)
+	}
+}
+
+// cpDialerAgent adds the GuestDialer data path to cpMockAgent: the M4
+// gateway's in-proc branch (embervm dev) dials the guest directly.
+type cpDialerAgent struct {
+	cpMockAgent
+	addr string // stand-in guest listener host:port
+}
+
+func (d *cpDialerAgent) DialGuest(_ context.Context, _ string, _ int) (net.Conn, error) {
+	return net.Dial("tcp", d.addr)
+}
+
+func TestServerGuestProxy(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "guest %s %s", r.Method, r.URL.Path)
+	}))
+	defer guest.Close()
+	h := newTestServer(t, &cpDialerAgent{addr: strings.TrimPrefix(guest.URL, "http://")})
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	if sb.ID == "" {
+		t.Fatalf("no sandbox id: %s", w.Body)
+	}
+	base := "/v0/sandboxes/" + sb.ID + "/proxy/8080"
+
+	// Any method, any subpath, owner-scoped.
+	if w := call(h, http.MethodPost, base+"/api/run", nil); w.Code != http.StatusOK || w.Body.String() != "guest POST /api/run" {
+		t.Errorf("proxy = %d %q", w.Code, w.Body)
+	}
+	if w := callAs(h, "tok2", http.MethodGet, base+"/x", nil); w.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant proxy = %d, want 404", w.Code)
+	}
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/99999/x", nil); w.Code != http.StatusBadRequest {
+		t.Errorf("bad port = %d, want 400", w.Code)
+	}
+}
+
+// TestServerGuestProxyUnsupportedAgent pins the capability gate: an agent
+// with neither GuestDialer nor GuestProxier yields 501, not a panic.
+func TestServerGuestProxyUnsupportedAgent(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/x", nil); w.Code != http.StatusNotImplemented {
+		t.Errorf("proxy without dialer = %d, want 501: %s", w.Code, w.Body)
 	}
 }

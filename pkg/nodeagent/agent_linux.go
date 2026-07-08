@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/embervm/embervm/pkg/guestapi"
 	"github.com/embervm/embervm/pkg/lifecycle"
 	"github.com/embervm/embervm/pkg/memsnap"
+	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/netns"
 	"github.com/embervm/embervm/pkg/nodeapi"
 	"github.com/embervm/embervm/pkg/template"
@@ -59,6 +61,7 @@ type sandbox struct {
 	snapLayer   string              // layer whose snapfile the next resume loads ("p3", "cold", ...)
 	restoreTier string              // tier the last restore pulled from ("" = local)
 	diskOrigin  *DiskOrigin         // non-nil when the disk chain roots off another sandbox (golden clone)
+	egress      string              // "nat" (default) | "none"
 	// forceFullPause roots a fresh Full chain on the next pause (set after
 	// a cold restore: the synthetic-full parent lives in the cold store).
 	forceFullPause bool
@@ -170,6 +173,7 @@ func (a *Agent) BuildTemplate(ctx context.Context, templateID, image string) err
 
 // CreateSandbox clones storage, boots a microVM, and waits for guestd.
 func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
+	createStart := time.Now()
 	if req.VCPUs == 0 {
 		req.VCPUs = 1
 	}
@@ -181,7 +185,11 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	}
 
 	if meta, ok := a.goldenFor(ctx, req.TemplateID, req); ok {
-		return a.fastCreate(ctx, req, meta)
+		st, err := a.fastCreate(ctx, req, meta)
+		if err == nil {
+			metrics.CreateSeconds.WithLabelValues("fast").Observe(time.Since(createStart).Seconds())
+		}
+		return st, err
 	}
 
 	m := lifecycle.New(lifecycle.StatePending)
@@ -209,10 +217,16 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 		templateID:  req.TemplateID,
 		dataDiskGiB: req.DataDiskGiB,
 		mountDir:    paths.Dir,
+		egress:      req.Egress,
 	}
 	if err := os.MkdirAll(sb.dir, 0o755); err != nil {
 		a.cleanup(ctx, sb)
 		return nodeapi.SandboxStatus{}, err
+	}
+	// Egress before boot: a "none" sandbox must never see the world.
+	if err := a.applyEgress(ctx, sb); err != nil {
+		a.cleanup(ctx, sb)
+		return nodeapi.SandboxStatus{}, fmt.Errorf("apply egress policy: %w", err)
 	}
 	if err := a.bootFresh(ctx, sb); err != nil {
 		a.cleanup(ctx, sb)
@@ -227,6 +241,7 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	if err := a.waitGuest(ctx, sb, 30*time.Second); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("guestd did not come up: %w", err)
 	}
+	metrics.CreateSeconds.WithLabelValues("cold").Observe(time.Since(createStart).Seconds())
 	return a.statusLocked(sb), nil
 }
 
@@ -364,6 +379,18 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 
 // ResumeSandbox restores the VM from its snapshot via the uffd handler.
 func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.SandboxStatus, error) {
+	start := time.Now()
+	st, err := a.resume(ctx, sandboxID)
+	if err == nil {
+		metrics.RestoreSeconds.WithLabelValues("hot").Observe(time.Since(start).Seconds())
+	}
+	return st, err
+}
+
+// resume is the shared implementation. RestoreSandbox, fastCreate, and
+// SnapshotSandbox come here directly: the flow the user invoked owns the
+// metrics observation, so nothing is counted twice.
+func (a *Agent) resume(ctx context.Context, sandboxID string) (nodeapi.SandboxStatus, error) {
 	sb, err := a.get(sandboxID)
 	if err != nil {
 		return nodeapi.SandboxStatus{}, err
@@ -459,7 +486,7 @@ func (a *Agent) SnapshotSandbox(ctx context.Context, sandboxID, tag string) (str
 	if err := a.PauseSandbox(ctx, sandboxID); err != nil {
 		return "", err
 	}
-	if _, err := a.ResumeSandbox(ctx, sandboxID); err != nil {
+	if _, err := a.resume(ctx, sandboxID); err != nil {
 		return "", err
 	}
 	sb, err := a.get(sandboxID)
@@ -552,6 +579,16 @@ func (a *Agent) Healthz(_ context.Context) (nodeapi.NodeHealth, error) {
 	}
 	a.failed = nil // reported once; the control plane owns it now
 	return h, nil
+}
+
+// DialGuest opens a TCP connection to a guest port from inside the
+// sandbox's network namespace — the data path of the M4 gateway proxy.
+func (a *Agent) DialGuest(ctx context.Context, sandboxID string, port int) (net.Conn, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return sb.lease.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", sb.lease.GuestIP, port))
 }
 
 // SetBalloon retargets a running sandbox's balloon device.
@@ -656,6 +693,7 @@ func (a *Agent) killUffd(sb *sandbox) {
 func (a *Agent) cleanup(ctx context.Context, sb *sandbox) {
 	a.killFC(sb)
 	a.killUffd(sb)
+	a.clearEgress(ctx, sb)
 	if a.jailed() {
 		a.teardownJail(sb)
 	}

@@ -162,6 +162,7 @@ func (a *Agent) fastCreate(ctx context.Context, req nodeapi.CreateSandboxRequest
 		templateID:  req.TemplateID,
 		dataDiskGiB: meta.DataDiskGiB,
 		mountDir:    paths.Dir,
+		egress:      req.Egress,
 		snapCount:   1, // the golden's p1 is this chain's root
 		snapLayer:   "p1",
 		diskOrigin:  &DiskOrigin{SandboxID: meta.SandboxID, Tag: "p1"},
@@ -169,6 +170,10 @@ func (a *Agent) fastCreate(ctx context.Context, req nodeapi.CreateSandboxRequest
 	if err := os.MkdirAll(sb.snapDir(), 0o755); err != nil {
 		a.cleanup(ctx, sb)
 		return nodeapi.SandboxStatus{}, err
+	}
+	if err := a.applyEgress(ctx, sb); err != nil {
+		a.cleanup(ctx, sb)
+		return nodeapi.SandboxStatus{}, fmt.Errorf("apply egress policy: %w", err)
 	}
 	// The golden's staging artifacts become the clone's chain root.
 	goldenSnap := filepath.Join(a.cfg.WorkDir, meta.SandboxID, "snap")
@@ -197,7 +202,7 @@ func (a *Agent) fastCreate(ctx context.Context, req nodeapi.CreateSandboxRequest
 	a.sbx[req.SandboxID] = sb
 	a.mu.Unlock()
 
-	st, err := a.ResumeSandbox(ctx, req.SandboxID)
+	st, err := a.resume(ctx, req.SandboxID)
 	if err != nil {
 		a.mu.Lock()
 		delete(a.sbx, req.SandboxID)
