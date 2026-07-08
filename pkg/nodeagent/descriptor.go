@@ -26,6 +26,17 @@ type SnapshotDescriptor struct {
 	Tier       string   `json:"tier,omitempty"`
 	DiskLayers []string `json:"disk_layers,omitempty"`
 	SnapSeq    int      `json:"snap_seq,omitempty"`
+	// DiskOrigin, when set, roots the disk delta chain off ANOTHER
+	// sandbox's snapshot (a golden clone) instead of the template — a
+	// restoring node must materialize that sandbox's chain first (GUID
+	// lineage).
+	DiskOrigin *DiskOrigin `json:"disk_origin,omitempty"`
+}
+
+// DiskOrigin names a sandbox-snapshot clone base.
+type DiskOrigin struct {
+	SandboxID string `json:"sandbox_id"`
+	Tag       string `json:"tag"`
 }
 
 // L1 object keys, all under the store's meta/ namespace.

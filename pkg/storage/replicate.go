@@ -32,6 +32,10 @@ type Replicator interface {
 	// ReceiveSnapshotDelta applies one delta stream in order; the first
 	// call clones lineage off the local template dataset.
 	ReceiveSnapshotDelta(ctx context.Context, sandboxID, templateID string, r io.Reader) error
+	// ReceiveSnapshotDeltaFrom is ReceiveSnapshotDelta with a SANDBOX
+	// origin (fast-created sandboxes clone a golden sandbox's snapshot,
+	// so their delta chain's base GUID is golden@tag, not template@final).
+	ReceiveSnapshotDeltaFrom(ctx context.Context, sandboxID, originSandboxID, originTag string, r io.Reader) error
 	// SetSandboxMountpoint pins the dataset mountpoint. A Firecracker
 	// snapfile records absolute drive paths, so a restored sandbox's
 	// dataset must mount exactly where the origin node's did.
@@ -119,10 +123,25 @@ func (b *ZFSBackend) SendSnapshotDelta(ctx context.Context, sandboxID, fromTag, 
 
 // ReceiveSnapshotDelta implements Replicator.
 func (b *ZFSBackend) ReceiveSnapshotDelta(ctx context.Context, sandboxID, templateID string, r io.Reader) error {
-	if err := validateID("sandbox", sandboxID); err != nil {
+	if err := validateID("template", templateID); err != nil {
 		return err
 	}
-	if err := validateID("template", templateID); err != nil {
+	return b.receiveDelta(ctx, sandboxID, b.templateDS(templateID)+"@final", r)
+}
+
+// ReceiveSnapshotDeltaFrom implements Replicator.
+func (b *ZFSBackend) ReceiveSnapshotDeltaFrom(ctx context.Context, sandboxID, originSandboxID, originTag string, r io.Reader) error {
+	if err := validateID("sandbox", originSandboxID); err != nil {
+		return err
+	}
+	if err := validateID("tag", originTag); err != nil {
+		return err
+	}
+	return b.receiveDelta(ctx, sandboxID, b.sandboxDS(originSandboxID)+"@"+originTag, r)
+}
+
+func (b *ZFSBackend) receiveDelta(ctx context.Context, sandboxID, origin string, r io.Reader) error {
+	if err := validateID("sandbox", sandboxID); err != nil {
 		return err
 	}
 	if parent := b.pool + "/sandboxes"; !b.datasetExists(ctx, parent) {
@@ -132,8 +151,7 @@ func (b *ZFSBackend) ReceiveSnapshotDelta(ctx context.Context, sandboxID, templa
 	}
 	sds := b.sandboxDS(sandboxID)
 	if !b.datasetExists(ctx, sds) {
-		return b.stream(ctx, r, nil, "receive",
-			"-o", "origin="+b.templateDS(templateID)+"@final", sds)
+		return b.stream(ctx, r, nil, "receive", "-o", "origin="+origin, sds)
 	}
 	// -F rolls back to the latest received snapshot first, so replaying a
 	// chain over a partially-restored dataset stays deterministic.

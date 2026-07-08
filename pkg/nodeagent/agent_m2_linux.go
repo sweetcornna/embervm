@@ -180,6 +180,7 @@ func (a *Agent) pushL1(ctx context.Context, sb *sandbox, m *memsnap.Manifest, la
 		Tier:          "warm",
 		DiskLayers:    sb.diskLayers,
 		SnapSeq:       sb.snapCount,
+		DiskOrigin:    sb.diskOrigin,
 	}
 	for _, lm := range sb.layers {
 		desc.Layers = append(desc.Layers, lm.LayerID)
@@ -247,12 +248,23 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 	}); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: template: %w", sandboxID, err)
 	}
-	for _, layer := range diskLayers {
+	if desc.DiskOrigin != nil {
+		// A golden clone: its chain's base GUID is golden@tag, so the
+		// golden's own chain must exist locally first (GUID lineage).
+		if err := a.ensureSandboxChain(ctx, repl, desc.DiskOrigin.SandboxID); err != nil {
+			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: golden lineage: %w", sandboxID, err)
+		}
+	}
+	for i, layer := range diskLayers {
 		rc, err := src.GetObject(ctx, KeyDiskDelta(sandboxID, layer))
 		if err != nil {
 			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: disk %s: %w", sandboxID, layer, err)
 		}
-		err = repl.ReceiveSnapshotDelta(ctx, sandboxID, desc.TemplateID, rc)
+		if i == 0 && desc.DiskOrigin != nil {
+			err = repl.ReceiveSnapshotDeltaFrom(ctx, sandboxID, desc.DiskOrigin.SandboxID, desc.DiskOrigin.Tag, rc)
+		} else {
+			err = repl.ReceiveSnapshotDelta(ctx, sandboxID, desc.TemplateID, rc)
+		}
 		rc.Close()
 		if err != nil {
 			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: receive %s: %w", sandboxID, layer, err)
@@ -280,6 +292,7 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		dataRaw:     filepath.Join(desc.Dir, "data.raw"),
 		snapCount:   snapSeq,
 		diskLayers:  diskLayers,
+		diskOrigin:  desc.DiskOrigin,
 		restoreTier: tier,
 		// A cold snapshot's chunks live only in the cold store; the next
 		// pause roots a fresh Full chain back in L1 (ADR-0004 D7).
@@ -392,6 +405,33 @@ func putStreamTo(ctx context.Context, dst chunkstore.Objects, key string, produc
 		return produceErr
 	}
 	return putErr
+}
+
+// ensureSandboxChain materializes another sandbox's disk chain locally
+// from its L1 descriptor — the golden lineage a fast-created clone's
+// restore depends on. No-op when the dataset already exists.
+func (a *Agent) ensureSandboxChain(ctx context.Context, repl storage.Replicator, id string) error {
+	var desc SnapshotDescriptor
+	if err := getJSONFrom(ctx, a.l1, KeySnapshotJSON(id), &desc); err != nil {
+		return fmt.Errorf("descriptor for %s: %w", id, err)
+	}
+	if err := a.receiveObject(ctx, KeyTemplateStream(desc.TemplateID), func(r io.Reader) error {
+		return repl.ReceiveTemplate(ctx, desc.TemplateID, r)
+	}); err != nil {
+		return err
+	}
+	for _, layer := range desc.DiskLayers {
+		rc, err := a.l1.GetObject(ctx, KeyDiskDelta(id, layer))
+		if err != nil {
+			return fmt.Errorf("disk %s: %w", layer, err)
+		}
+		err = repl.ReceiveSnapshotDelta(ctx, id, desc.TemplateID, rc)
+		rc.Close()
+		if err != nil {
+			return fmt.Errorf("receive %s: %w", layer, err)
+		}
+	}
+	return nil
 }
 
 func (a *Agent) receiveObject(ctx context.Context, key string, consume func(io.Reader) error) error {

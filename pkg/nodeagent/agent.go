@@ -55,6 +55,14 @@ type Config struct {
 	// (unit tests drive reapZombies directly).
 	WatchdogInterval time.Duration
 
+	// Golden* configure template golden snapshots (M4 fast-create, G4
+	// 创建<500ms). GoldenMemoryMiB=0 disables. Fast-create requires
+	// chunked + jailed + L1 + ZFS; sandboxes whose requested geometry
+	// matches the golden's are created by hot-restoring the golden image.
+	GoldenVCPUs       int
+	GoldenMemoryMiB   int
+	GoldenDataDiskGiB int
+
 	// PauseBalloonSettle enables balloon-assisted pause (chunked mode)
 	// when > 0: inflate the balloon to half the guest's memory, wait this
 	// long for the guest to hand pages back, then snapshot — the chunk

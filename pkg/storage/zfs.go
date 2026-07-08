@@ -128,6 +128,37 @@ func (b *ZFSBackend) CloneSandbox(ctx context.Context, sandboxID, templateID str
 	return paths, nil
 }
 
+// CloneSandboxFrom creates a sandbox's storage as a clone of ANOTHER
+// sandbox's snapshot (the M4 golden fast-create path: disk state must match
+// the golden memory image, so cloning the template would be wrong).
+func (b *ZFSBackend) CloneSandboxFrom(ctx context.Context, newID, srcID, tag string) (SandboxPaths, error) {
+	for _, v := range []struct{ kind, id string }{
+		{"sandbox", newID}, {"sandbox", srcID}, {"tag", tag},
+	} {
+		if err := validateID(v.kind, v.id); err != nil {
+			return SandboxPaths{}, err
+		}
+	}
+	if parent := b.pool + "/sandboxes"; !b.datasetExists(ctx, parent) {
+		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
+			return SandboxPaths{}, err
+		}
+	}
+	nds := b.sandboxDS(newID)
+	if _, err := b.run(ctx, "zfs", "clone", b.sandboxDS(srcID)+"@"+tag, nds); err != nil {
+		return SandboxPaths{}, err
+	}
+	mp, err := b.mountpoint(ctx, nds)
+	if err != nil {
+		return SandboxPaths{}, err
+	}
+	return SandboxPaths{
+		Dir:        mp,
+		RootfsExt4: filepath.Join(mp, "rootfs.ext4"),
+		DataRaw:    filepath.Join(mp, "data.raw"),
+	}, nil
+}
+
 // Snapshot implements Backend.
 func (b *ZFSBackend) Snapshot(ctx context.Context, sandboxID, tag string) (string, error) {
 	if err := validateID("sandbox", sandboxID); err != nil {

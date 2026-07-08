@@ -58,6 +58,7 @@ type sandbox struct {
 	diskLayers  []string            // zfs delta chain tags (outlives memory-chain restarts)
 	snapLayer   string              // layer whose snapfile the next resume loads ("p3", "cold", ...)
 	restoreTier string              // tier the last restore pulled from ("" = local)
+	diskOrigin  *DiskOrigin         // non-nil when the disk chain roots off another sandbox (golden clone)
 	// forceFullPause roots a fresh Full chain on the next pause (set after
 	// a cold restore: the synthetic-full parent lives in the cold store).
 	forceFullPause bool
@@ -72,6 +73,7 @@ type Agent struct {
 	l1         chunkstore.Backend // optional L1 object store (EMBERVM_L1_*)
 	cold       chunkstore.Backend // optional cold-tier store (EMBERVM_COLD_*)
 	failed     []string           // watchdog-reaped ids, drained by Healthz
+	golden     map[string]goldenMeta
 }
 
 var _ nodeapi.Agent = (*Agent)(nil)
@@ -105,7 +107,7 @@ func New(cfg Config) (nodeapi.Agent, error) {
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		return nil, err
 	}
-	a := &Agent{cfg: cfg, sbx: map[string]*sandbox{}}
+	a := &Agent{cfg: cfg, sbx: map[string]*sandbox{}, golden: map[string]goldenMeta{}}
 	if a.chunked() {
 		if cfg.ChunkStoreDir == "" {
 			cfg.ChunkStoreDir = filepath.Join(cfg.WorkDir, "chunks")
@@ -157,6 +159,12 @@ func (a *Agent) BuildTemplate(ctx context.Context, templateID, image string) err
 			return fmt.Errorf("push template %s to L1: %w", templateID, err)
 		}
 	}
+	if a.goldenEnabled() {
+		if err := a.buildGolden(ctx, templateID); err != nil {
+			// Fast-create is an optimization; the template itself is fine.
+			log.Printf("nodeagent: golden snapshot for %s failed (cold boots continue to work): %v", templateID, err)
+		}
+	}
 	return nil
 }
 
@@ -170,6 +178,10 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	}
 	if req.DataDiskGiB == 0 {
 		req.DataDiskGiB = 15
+	}
+
+	if meta, ok := a.goldenFor(ctx, req.TemplateID, req); ok {
+		return a.fastCreate(ctx, req, meta)
 	}
 
 	m := lifecycle.New(lifecycle.StatePending)
