@@ -85,7 +85,11 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 	if snapType == "Full" {
 		m, err = memsnap.WriteLayer(memfile, opts, sink)
 	} else {
-		opts.Parent = sb.layerID(layerN - 1)
+		// The chain parent is the last COMMITTED layer, not p(N-1) by
+		// arithmetic: after an M5 rollback the sequence keeps counting
+		// (monotone tags) while the chain resumes from the rollback target
+		// — a diff over p1 may well be p3.
+		opts.Parent = sb.layers[len(sb.layers)-1].LayerID
 		var parent *memsnap.View
 		parent, err = memsnap.Resolve(sb.layers)
 		if err != nil {
