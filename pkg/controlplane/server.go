@@ -286,6 +286,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
+	sb.NodeID = nodeID
 	st, err := agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
 		SandboxID: id, TemplateID: body.TemplateID,
 		VCPUs: body.VCPUs, MemoryMiB: body.MemoryMiB, DataDiskGiB: body.DataDiskGiB,
@@ -383,6 +384,7 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		agent, err = s.agentByID(nodeID)
 		if err == nil {
 			if err = s.store.SetSandboxNode(c, id, nodeID); err == nil {
+				sb.NodeID = nodeID
 				st, err = agent.RestoreSandbox(c, id, tier)
 			}
 		}
