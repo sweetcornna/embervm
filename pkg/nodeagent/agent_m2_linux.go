@@ -95,6 +95,16 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 	if err != nil {
 		return fmt.Errorf("chunkify %s: %w", layerID, err)
 	}
+	if snapType == "Full" {
+		// A fresh chain root: manifests from earlier epochs (e.g. the
+		// synthetic layer-cold.json a cold restore fetched) must not leak
+		// into the handler's layer-*.json glob — two full layers cannot
+		// resolve.
+		stale, _ := filepath.Glob(filepath.Join(snapDir, "layer-*.json"))
+		for _, f := range stale {
+			_ = os.Remove(f)
+		}
+	}
 	if err := m.WriteFile(filepath.Join(snapDir, "layer-"+layerID+".json")); err != nil {
 		return err
 	}

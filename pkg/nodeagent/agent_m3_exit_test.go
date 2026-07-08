@@ -313,9 +313,34 @@ func TestLifecycleTTLFlow(t *testing.T) {
 	}
 	execIn("test -s /dirty.bin") // disk state followed through the chain
 
-	// --- COLD → RECYCLED → selective restore --------------------------------
+	// --- chain restart: hot resume after the post-cold-restore pause -------
+	// The pause after a cold restore roots a fresh Full chain; the resume
+	// must see ONLY the new chain (a stale synthetic layer-cold.json in the
+	// snap dir would make the manifest chain unresolvable).
 	if code := a.do("POST", "/v0/sandboxes/"+id+"/pause", nil, nil); code/100 != 2 {
 		t.Fatalf("pause 3: HTTP %d", code)
+	}
+	resumed := false
+	for attempt := 0; attempt < 3 && !resumed; attempt++ {
+		// The engine may demote to WARM under us; both tiers must resume.
+		if code := a.do("POST", "/v0/sandboxes/"+id+"/resume", nil, nil); code/100 == 2 {
+			resumed = true
+		} else {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	if !resumed {
+		t.Fatal("resume after chain restart failed")
+	}
+	a.waitState(id, "RUNNING", 15*time.Second)
+	if got := readFile("/artifact.txt"); got != "precious result" {
+		t.Fatalf("artifact after chain-restart resume = %q", got)
+	}
+	t.Logf("chain-restart resume verified (fresh Full chain after cold restore)")
+
+	// --- COLD → RECYCLED → selective restore --------------------------------
+	if code := a.do("POST", "/v0/sandboxes/"+id+"/pause", nil, nil); code/100 != 2 {
+		t.Fatalf("pause 4: HTTP %d", code)
 	}
 	a.waitState(id, "RECYCLED", 90*time.Second)
 	t.Logf("engine recycled the sandbox (artifacts only)")
