@@ -54,6 +54,7 @@ type sandbox struct {
 	mountDir    string              // dataset mountpoint (drive paths live here)
 	layers      []*memsnap.Manifest // chunked memory chain, full root first
 	diskLayers  []string            // zfs delta chain tags (outlives memory-chain restarts)
+	snapLayer   string              // layer whose snapfile the next resume loads ("p3", "cold", ...)
 	restoreTier string              // tier the last restore pulled from ("" = local)
 	// forceFullPause roots a fresh Full chain on the next pause (set after
 	// a cold restore: the synthetic-full parent lives in the cold store).
@@ -359,7 +360,7 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 		ResumeVM:     true,
 	}
 	if a.chunked() {
-		load.SnapshotPath = sb.snapfile(sb.layerID(sb.snapCount))
+		load.SnapshotPath = sb.snapfile(sb.snapLayer)
 		load.TrackDirtyPages = true // keep Diff pauses possible after restore
 		load.ClockRealtime = true   // 校时: re-arm the guest realtime clock
 	}

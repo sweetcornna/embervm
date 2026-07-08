@@ -115,7 +115,7 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 		return err
 	}
 	sb.diskLayers = append(sb.diskLayers, layerID)
-	_ = prevDisk // consumed by pushL1 below
+	sb.snapLayer = layerID
 	if a.l1 != nil {
 		if err := a.pushL1(ctx, sb, m, layerID, prevDisk); err != nil {
 			// Write-through is the RPO guarantee (docs/zh/02 §3): a pause
@@ -290,6 +290,7 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		sb.layers = append(sb.layers, m)
 	}
 	last := desc.Layers[len(desc.Layers)-1]
+	sb.snapLayer = last
 	if err := a.fetchFileFrom(ctx, src, KeySnapfile(sandboxID, last), sb.snapfile(last)); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
