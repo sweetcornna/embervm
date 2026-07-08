@@ -275,7 +275,7 @@ func (a *Agent) launchFC(sb *sandbox, logName string) (string, error) {
 	}
 	sb.fc = fc
 	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
-	if err := waitSocket(apiSock, 5*time.Second); err != nil {
+	if err := waitSocketReady(apiSock, 10*time.Second); err != nil {
 		return "", err
 	}
 	return apiSock, nil
@@ -717,4 +717,22 @@ func waitSocket(path string, timeout time.Duration) error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for socket %s", path)
+}
+
+// waitSocketReady waits until the unix socket ACCEPTS a connection. The
+// stat-based waitSocket races Firecracker's bind()→listen() window: under a
+// boot storm the socket file exists while connect(2) still refuses (seen at
+// 50-way create concurrency). Only for sockets whose owner tolerates a probe
+// connection (the FC API server); the uffd socket expects exactly one peer —
+// Firecracker — and must keep the stat-based wait.
+func waitSocketReady(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if conn, err := net.Dial("unix", path); err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for socket %s to accept", path)
 }
