@@ -5,7 +5,7 @@
 
 ## 中文摘要
 
-M3 让暂停的沙箱按可配置 TTL 自动流转 HOT→WARM→COLD→RECYCLED(docs/zh/02 §3)。**层级语义**(D1):HOT = 本机 + L1 全量;WARM = 仅 L1(节点资源全释放);COLD = 仅冷层(synthetic full);RECYCLED = 仅 artifacts.tar.zst。除 RECYCLED 外每层都可 resume;RECYCLED 对原沙箱终态,其 artifacts 灌入新沙箱(选择性恢复)。**生命周期引擎**(D2):控制面 goroutine 按 tick 扫 PostgreSQL,**CAS 先行再执行动作**——用户 resume 与引擎降级竞态时,CAS 输家干净退出;动作失败标 FAILED 带错误,绝不静默重试;TTL 以进入当前层的时刻(updated_at)计。**WARM 释放**(D3):校验 L1 有恢复描述符后销毁 dataset/工作目录/netns 租约;共享内容寻址的本地 chunk 缓存不按沙箱清除(LRU 驱逐属 M4)。**COLD 归档**(D4):纯存储面操作——内存链 `memsnap.Synthesize` 元数据级合成全量(chunk 零搬移,落掉 M2 的"diff 链无界增长"债;冷恢复只读一层),引用 chunk 经去重 Copier 搬到冷层,snapfile/ws/磁盘增量链原样搬移,描述符改写 tier=cold 后删除 L1 副本;磁盘 synthetic full 需要活 dataset,继续留链(zfs receive 顺序重放,记 M4)。**chunk GC**(D5):以 sandboxes/*/layer-*.json 为根的 mark-and-sweep,先列 manifest 后列 chunk,宽限窗保护"chunk 已传、manifest 未传"的进行中 pause。**RECYCLED**(D6):节点收链、只读 loop 挂载(noload)、打包指定 guest 路径为 zstd tar 存冷层,删除其余对象并 GC 双store;`POST /restore-artifacts` 以同模板新建沙箱、宿主侧解压后经 guestd 灌回(guest busybox tar 无 zstd)。**冷恢复链重启**(D7):synthetic full 的父块在冷层,若继续 Diff 会把链劈到两个 store——冷恢复后下一次 pause 强制 Full 重开链;磁盘增量链跨内存链重启延续(descriptor 分列 disk_layers + snap_seq 防 tag 冲突)。**预热**(D8):移植 Serverless in the Wild——pause→resume 间隔直方图,≥3 样本且 CV≤2 才预测(P5 窗口),引擎在预测唤醒前 lead 经节点 Prewarm 动词把 WS chunk 拉回本地缓存,pause 时清 prewarmed_at;历史稀疏/嘈杂回退固定 keep-alive(TTL 本身),ARIMA 推迟;预解压不做(lz4 5GB/s 非瓶颈)。**成本报表**(D9):按需从 manifest 算 logical/stored/去重比,分层出账;不缓存。**退出门禁**(D10):全栈 e2e(真实 REST + 引擎 + ZFS + 双 MinIO 桶 + PG)驱动完整层链,冷恢复 <10s 可交互 + seq 连续,归档 stored/logical ≤0.6 为"成本达标"的 CI 相对代理,RECYCLE 后仅剩 artifacts,选择性恢复经新沙箱验证;`--- PASS` 防伪绿。
+M3 让暂停的沙箱按可配置 TTL 自动流转 HOT→WARM→COLD→RECYCLED(docs/zh/02 §3)。**层级语义**(D1):HOT = 本机 + L1 全量;WARM = 仅 L1(节点资源全释放);COLD = 仅冷层(synthetic full);RECYCLED = 仅 artifacts.tar.zst。除 RECYCLED 外每层都可 resume;RECYCLED 对原沙箱终态,其 artifacts 灌入新沙箱(选择性恢复)。**生命周期引擎**(D2):控制面 goroutine 按 tick 扫 PostgreSQL;竞态纪律按动作性质分两种——**破坏源数据的迁移(HOT→WARM)CAS 先行**,动作失败标 FAILED 不重试;**拷贝型迁移(WARM→COLD、COLD→RECYCLED)prepare→CAS→prune**:先幂等地把目标层拷齐(去重跳过),CAS 提交后才清理源层,读到新层的一定是完整副本,prepare 失败原层无损、下轮重试(首轮 e2e 实测抓到 CAS 先行时 COLD 描述符未就绪的竞态窗口,遂修)。TTL 以进入当前层的时刻(updated_at)计。**WARM 释放**(D3):校验 L1 有恢复描述符后销毁 dataset/工作目录/netns 租约;共享内容寻址的本地 chunk 缓存不按沙箱清除(LRU 驱逐属 M4)。**COLD 归档**(D4):纯存储面操作——内存链 `memsnap.Synthesize` 元数据级合成全量(chunk 零搬移,落掉 M2 的"diff 链无界增长"债;冷恢复只读一层),引用 chunk 经去重 Copier 搬到冷层,snapfile/ws/磁盘增量链原样搬移,描述符改写 tier=cold 后删除 L1 副本;磁盘 synthetic full 需要活 dataset,继续留链(zfs receive 顺序重放,记 M4)。**chunk GC**(D5):以 sandboxes/*/layer-*.json 为根的 mark-and-sweep,先列 manifest 后列 chunk,宽限窗保护"chunk 已传、manifest 未传"的进行中 pause。**RECYCLED**(D6):节点收链、只读 loop 挂载(noload)、打包指定 guest 路径为 zstd tar 存冷层,删除其余对象并 GC 双store;`POST /restore-artifacts` 以同模板新建沙箱、宿主侧解压后经 guestd 灌回(guest busybox tar 无 zstd)。**冷恢复链重启**(D7):synthetic full 的父块在冷层,若继续 Diff 会把链劈到两个 store——冷恢复后下一次 pause 强制 Full 重开链;磁盘增量链跨内存链重启延续(descriptor 分列 disk_layers + snap_seq 防 tag 冲突)。**预热**(D8):移植 Serverless in the Wild——pause→resume 间隔直方图,≥3 样本且 CV≤2 才预测(P5 窗口),引擎在预测唤醒前 lead 经节点 Prewarm 动词把 WS chunk 拉回本地缓存,pause 时清 prewarmed_at;历史稀疏/嘈杂回退固定 keep-alive(TTL 本身),ARIMA 推迟;预解压不做(lz4 5GB/s 非瓶颈)。**成本报表**(D9):按需从 manifest 算 logical/stored/去重比,分层出账;不缓存。**退出门禁**(D10):全栈 e2e(真实 REST + 引擎 + ZFS + 双 MinIO 桶 + PG)驱动完整层链,冷恢复 <10s 可交互 + seq 连续,归档 stored/logical ≤0.6 为"成本达标"的 CI 相对代理,RECYCLE 后仅剩 artifacts,选择性恢复经新沙箱验证;`--- PASS` 防伪绿。
 
 ## Context
 
@@ -31,15 +31,27 @@ pre-warming, artifacts-only recycling, and a cost report — with exit criteria 
 RECYCLED (terminal for that sandbox; selective restore seeds a NEW one). Tiers may not be
 skipped; WARM/COLD may FAIL like any active state.
 
-### D2 — Lifecycle engine: CAS-then-act, TTLs per tier, failures are loud
+### D2 — Lifecycle engine: two race disciplines, TTLs per tier, failures are loud
 
-A control-plane goroutine scans PostgreSQL each tick. The state change is a compare-and-swap
-(`UPDATE ... WHERE state=from`) taken BEFORE the tier action: a user resume racing a demotion
-either wins the CAS (transition skipped) or observes the new tier and takes the restore path —
-the REST resume claims RESUMING through the same CAS. A tier action that fails marks the
-sandbox FAILED with the error; nothing silently retries. TTLs measure time in the *current*
-tier (updated_at is stamped on every transition); zero disables a transition, so plain
-deployments archive nothing until the operator opts in (`EMBERVM_TTL_*` env).
+A control-plane goroutine scans PostgreSQL each tick; every state change is a compare-and-swap
+(`UPDATE ... WHERE state=from`), and the REST resume claims RESUMING through the same CAS. The
+ORDER of CAS vs action depends on what the action does to the current tier's data:
+
+- **Destructive-to-source (HOT→WARM, ReleaseLocal):** CAS FIRST. A racing resume either wins
+  the CAS or sees WARM and takes the restore path; the source (L1) is untouched by the action,
+  so acting after the CAS is safe. A failing action marks the sandbox FAILED — loud, never
+  silently retried.
+- **Copy-then-prune (WARM→COLD, COLD→RECYCLED):** PREPARE first (idempotent copies into the
+  destination store — chunk copies dedup, object puts overwrite identically), CAS second,
+  PRUNE last (best-effort; stale source objects fall to the GC). Anyone who observes the new
+  tier sees a complete copy; a resume racing the prepare finds the old tier intact; a prepare
+  failure leaves the sandbox where it was and retries next tick. The first e2e run caught the
+  CAS-first version red-handed: the state read ARCHIVED_COLD while the cold descriptor was
+  still being written, and readers of the new tier 404'd.
+
+TTLs measure time in the *current* tier (updated_at is stamped on every transition); zero
+disables a transition, so plain deployments archive nothing until the operator opts in
+(`EMBERVM_TTL_*` env).
 
 ### D3 — WARM releases the node, not the chunk cache
 

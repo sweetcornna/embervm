@@ -94,11 +94,17 @@ func (c EngineConfig) withDefaults() EngineConfig {
 }
 
 // Engine drives TTL tier transitions (docs/zh/02 §3): it scans PostgreSQL on
-// a tick and moves sandboxes HOT→WARM→COLD→RECYCLED. The state change is a
-// compare-and-swap taken BEFORE the tier action, so a resume racing a
-// transition either wins the CAS (transition skipped) or sees the new tier
-// and takes the restore path; a tier action that then fails marks the
-// sandbox FAILED with the error — loudly visible, never silently retried.
+// a tick and moves sandboxes HOT→WARM→COLD→RECYCLED. Two race disciplines,
+// chosen by what the action does to the CURRENT tier's data:
+//
+//   - Destructive-to-source (HOT→WARM releases node state): CAS FIRST, so a
+//     racing resume either wins the CAS or sees WARM and restores from L1.
+//     A failing action then marks the sandbox FAILED — loud, not retried.
+//   - Copy-then-prune (WARM→COLD, COLD→RECYCLED): PREPARE first (idempotent,
+//     dedup-skipped copies into the destination store), CAS second, PRUNE
+//     last. Readers of the new tier only ever see a complete copy; a resume
+//     racing the prepare still finds the old tier intact; prepare failures
+//     leave the sandbox untouched and retry next tick.
 type Engine struct {
 	store *Store
 	agent TierAgent
@@ -163,10 +169,21 @@ func (e *Engine) demoteWarmToCold(ctx context.Context) error {
 		return err
 	}
 	for _, sb := range due {
-		if err := e.transition(ctx, sb.ID, lifecycle.StatePausedWarm, lifecycle.StateArchivedCold,
-			func() error { return e.archiveToCold(ctx, sb.ID) }); err != nil {
+		if err := e.archivePrepare(ctx, sb.ID); err != nil {
+			// Idempotent (dedup-skipped) — retried on the next tick.
+			log.Printf("lifecycle engine: archive prepare %s: %v", sb.ID, err)
+			continue
+		}
+		err := e.store.TransitionSandbox(ctx, sb.ID,
+			string(lifecycle.StatePausedWarm), string(lifecycle.StateArchivedCold), "")
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+			continue // a resume won; the cold copy is harmless and reusable
+		}
+		if err != nil {
 			return err
 		}
+		log.Printf("lifecycle engine: %s PAUSED_WARM -> ARCHIVED_COLD", sb.ID)
+		e.archivePrune(ctx, sb.ID)
 	}
 	return nil
 }
@@ -181,18 +198,32 @@ func (e *Engine) recycleCold(ctx context.Context) error {
 		return err
 	}
 	for _, sb := range due {
-		paths := sb.ArtifactPaths
-		if err := e.transition(ctx, sb.ID, lifecycle.StateArchivedCold, lifecycle.StateRecycled,
-			func() error { return e.recycle(ctx, sb.ID, paths) }); err != nil {
+		if len(sb.ArtifactPaths) > 0 {
+			if err := e.agent.ExtractArtifacts(ctx, sb.ID, sb.ArtifactPaths); err != nil {
+				// Reads the cold copy, writes only the tarball — retryable.
+				log.Printf("lifecycle engine: extract artifacts %s: %v", sb.ID, err)
+				continue
+			}
+		}
+		err := e.store.TransitionSandbox(ctx, sb.ID,
+			string(lifecycle.StateArchivedCold), string(lifecycle.StateRecycled), "")
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+			continue // a resume won; the tarball sits harmlessly beside the snapshot
+		}
+		if err != nil {
 			return err
 		}
+		log.Printf("lifecycle engine: %s ARCHIVED_COLD -> RECYCLED", sb.ID)
+		e.recyclePrune(ctx, sb.ID)
 	}
 	return nil
 }
 
-// archiveToCold is the WARM→COLD store operation (control-plane only, no
-// node involved).
-func (e *Engine) archiveToCold(ctx context.Context, id string) error {
+// archivePrepare copies everything the COLD tier needs into the cold store
+// (control-plane only, no node involved). Idempotent: chunk copies dedup,
+// object puts overwrite with identical content — safe to retry and safe to
+// abandon if the CAS loses.
+func (e *Engine) archivePrepare(ctx context.Context, id string) error {
 	var desc nodeagent.SnapshotDescriptor
 	if err := readJSONObject(ctx, e.l1, nodeagent.KeySnapshotJSON(id), &desc); err != nil {
 		return fmt.Errorf("archive %s: descriptor: %w", id, err)
@@ -273,34 +304,34 @@ func (e *Engine) archiveToCold(ctx context.Context, id string) error {
 		return fmt.Errorf("archive %s: descriptor: %w", id, err)
 	}
 
-	// Only after the cold copy is complete does the L1 copy disappear.
+	return nil
+}
+
+// archivePrune removes the L1 copy after the CAS committed the COLD tier.
+// Best-effort: a failure leaves stale-but-harmless L1 objects for the GC.
+func (e *Engine) archivePrune(ctx context.Context, id string) {
 	if err := deleteSandboxObjects(ctx, e.l1, id, ""); err != nil {
-		return fmt.Errorf("archive %s: prune L1: %w", id, err)
+		log.Printf("lifecycle engine: prune L1 after archiving %s: %v", id, err)
+		return
 	}
 	if res, err := chunkstore.GC(ctx, e.l1, e.cfg.GCGrace); err != nil {
 		log.Printf("lifecycle engine: L1 GC after archiving %s: %v", id, err)
 	} else if res.SweptChunks > 0 {
 		log.Printf("lifecycle engine: L1 GC swept %d chunks after archiving %s", res.SweptChunks, id)
 	}
-	return nil
 }
 
-// recycle is the COLD→RECYCLED store operation plus artifact extraction.
-func (e *Engine) recycle(ctx context.Context, id string, artifactPaths []string) error {
-	if len(artifactPaths) > 0 {
-		if err := e.agent.ExtractArtifacts(ctx, id, artifactPaths); err != nil {
-			return fmt.Errorf("recycle %s: extract: %w", id, err)
-		}
-	}
+// recyclePrune deletes every cold object but the artifacts after the CAS.
+func (e *Engine) recyclePrune(ctx context.Context, id string) {
 	if err := deleteSandboxObjects(ctx, e.cold, id, nodeagent.KeyArtifacts(id)); err != nil {
-		return fmt.Errorf("recycle %s: prune cold: %w", id, err)
+		log.Printf("lifecycle engine: prune cold after recycling %s: %v", id, err)
+		return
 	}
 	if res, err := chunkstore.GC(ctx, e.cold, e.cfg.GCGrace); err != nil {
 		log.Printf("lifecycle engine: cold GC after recycling %s: %v", id, err)
 	} else if res.SweptChunks > 0 {
 		log.Printf("lifecycle engine: cold GC swept %d chunks after recycling %s", res.SweptChunks, id)
 	}
-	return nil
 }
 
 // prewarmScan pulls working sets back to the node ahead of predicted wakes
