@@ -88,6 +88,12 @@ func callAs(h http.Handler, token, method, path string, body any) *httptest.Resp
 		rdr = bytes.NewReader(nil)
 	}
 	req := httptest.NewRequest(method, path, rdr)
+	// A real server request always has a cancelable context. Without one,
+	// httputil.ReverseProxy (the guest proxy) falls back to CloseNotifier,
+	// which gin's writer claims but the recorder cannot back — a panic.
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
