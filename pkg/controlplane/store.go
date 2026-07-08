@@ -9,6 +9,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -21,6 +22,9 @@ var migrationsFS embed.FS
 
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
+
+// ErrConflict marks a compare-and-swap state change that lost its race.
+var ErrConflict = errors.New("state changed concurrently")
 
 // Template is a persisted template row.
 type Template struct {
@@ -47,6 +51,10 @@ type Sandbox struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	PausedAt    *time.Time `json:"paused_at,omitempty"`
+	// ArtifactPaths are the guest paths preserved when the sandbox is
+	// RECYCLED (M3 selective restore); empty means keep nothing.
+	ArtifactPaths []string   `json:"artifact_paths,omitempty"`
+	PrewarmedAt   *time.Time `json:"prewarmed_at,omitempty"`
 }
 
 // Store is the PostgreSQL-backed persistence layer.
@@ -70,15 +78,26 @@ func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 // Close releases the pool.
 func (s *Store) Close() { s.pool.Close() }
 
-// Migrate applies the embedded schema (idempotent — the SQL uses IF NOT
-// EXISTS, so M1 needs no migration-version table).
+// Migrate applies every embedded migration in filename order (idempotent —
+// the SQL uses IF NOT EXISTS everywhere, so no version table is needed yet).
 func (s *Store) Migrate(ctx context.Context) error {
-	sqlBytes, err := migrationsFS.ReadFile("migrations/0001_init.sql")
+	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
-	if _, err := s.pool.Exec(ctx, string(sqlBytes)); err != nil {
-		return fmt.Errorf("apply migration: %w", err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sqlBytes, err := migrationsFS.ReadFile("migrations/" + name)
+		if err != nil {
+			return err
+		}
+		if _, err := s.pool.Exec(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -165,27 +184,32 @@ func (s *Store) DeleteTemplate(ctx context.Context, id string) error {
 
 // CreateSandbox inserts a sandbox in the given initial state.
 func (s *Store) CreateSandbox(ctx context.Context, sb Sandbox) (Sandbox, error) {
+	if sb.ArtifactPaths == nil {
+		sb.ArtifactPaths = []string{}
+	}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandboxes (id,template_id,state,vcpus,memory_mib,data_disk_gib,owner)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)
-		 RETURNING id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at`,
-		sb.ID, sb.TemplateID, sb.State, sb.VCPUs, sb.MemoryMiB, sb.DataDiskGiB, sb.Owner).
+		`INSERT INTO sandboxes (id,template_id,state,vcpus,memory_mib,data_disk_gib,owner,artifact_paths)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		 RETURNING `+sandboxCols,
+		sb.ID, sb.TemplateID, sb.State, sb.VCPUs, sb.MemoryMiB, sb.DataDiskGiB, sb.Owner, sb.ArtifactPaths).
 		Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
-			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt)
+			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
+			&sb.ArtifactPaths, &sb.PrewarmedAt)
 	return sb, err
 }
 
 func scanSandbox(row pgx.Row) (Sandbox, error) {
 	var sb Sandbox
 	err := row.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
-		&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt)
+		&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
+		&sb.ArtifactPaths, &sb.PrewarmedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
 	return sb, err
 }
 
-const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at`
+const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at`
 
 // GetSandbox fetches a sandbox by id.
 func (s *Store) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
@@ -227,7 +251,8 @@ func (s *Store) ListSandboxes(ctx context.Context, owner, state string) ([]Sandb
 	for rows.Next() {
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
-			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt); err != nil {
+			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
+			&sb.ArtifactPaths, &sb.PrewarmedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)
@@ -268,6 +293,69 @@ func (s *Store) SetSandboxState(ctx context.Context, id, from, to, netns, errMsg
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// TransitionSandbox is the compare-and-swap state change the lifecycle
+// engine uses: it only applies when the row is still in `from`, so a resume
+// racing a TTL transition loses cleanly (ErrConflict) instead of clobbering.
+func (s *Store) TransitionSandbox(ctx context.Context, id, from, to, errMsg string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx,
+		`UPDATE sandboxes SET state=$3, error=$4, updated_at=now() WHERE id=$1 AND state=$2`,
+		id, from, to, errMsg)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO sandbox_events (sandbox_id, from_state, to_state) VALUES ($1,$2,$3)`,
+		id, from, to); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ListTransitionDue returns sandboxes sitting in `state` since before
+// `before` (updated_at is stamped on every transition, so it marks when the
+// current state was entered).
+func (s *Store) ListTransitionDue(ctx context.Context, state string, before time.Time) ([]Sandbox, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+sandboxCols+` FROM sandboxes WHERE state=$1 AND updated_at < $2 ORDER BY updated_at`,
+		state, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Sandbox
+	for rows.Next() {
+		var sb Sandbox
+		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
+			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
+			&sb.ArtifactPaths, &sb.PrewarmedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sb)
+	}
+	return out, rows.Err()
+}
+
+// SetPrewarmedAt stamps the last pre-warm pull (nil clears it, e.g. on pause).
+func (s *Store) SetPrewarmedAt(ctx context.Context, id string, at *time.Time) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandboxes SET prewarmed_at=$2 WHERE id=$1`, id, at)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteSandbox removes a sandbox row.

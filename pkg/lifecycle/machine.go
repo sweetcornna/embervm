@@ -1,8 +1,8 @@
-// Package lifecycle holds the EmberVM sandbox state machine. M1 implements
-// the hot path only (RUNNING ⇄ PAUSED_HOT); the WARM/COLD/RECYCLED tiers
-// from docs/zh/02 §3 arrive in M3 and their names are reserved here so the
-// type is stable. Transitions are validated in exactly one place so every
-// caller (node agent, control plane) agrees on what is legal.
+// Package lifecycle holds the EmberVM sandbox state machine: the M1 hot
+// path (RUNNING ⇄ PAUSED_HOT) plus the M3 archive tiers of docs/zh/02 §3
+// (PAUSED_HOT → PAUSED_WARM → ARCHIVED_COLD → RECYCLED on TTLs, resume legal
+// from every tier except RECYCLED). Transitions are validated in exactly one
+// place so every caller (node agent, control plane) agrees on what is legal.
 package lifecycle
 
 import "fmt"
@@ -21,7 +21,8 @@ const (
 	StateStopped   State = "STOPPED"
 	StateFailed    State = "FAILED"
 
-	// Reserved for later milestones (M3 archive tiers); not yet reachable.
+	// M3 archive tiers (docs/zh/02 §3): WARM = L1 only (node released),
+	// COLD = cold store only (synthetic full), RECYCLED = artifacts only.
 	StatePausedWarm   State = "PAUSED_WARM"
 	StateArchivedCold State = "ARCHIVED_COLD"
 	StateRecycled     State = "RECYCLED"
@@ -30,24 +31,34 @@ const (
 // transitions is the legal edge set. FAILED is reachable from any active
 // (non-terminal) state and is added below rather than listed per-source.
 var transitions = map[State]map[State]bool{
-	StatePending:   {StateStarting: true},
-	StateStarting:  {StateRunning: true},
-	StateRunning:   {StatePausing: true, StateStopping: true},
-	StatePausing:   {StatePausedHot: true},
-	StatePausedHot: {StateResuming: true, StateStopping: true},
-	StateResuming:  {StateRunning: true},
-	StateStopping:  {StateStopped: true},
+	StatePending:      {StateStarting: true},
+	StateStarting:     {StateRunning: true},
+	StateRunning:      {StatePausing: true, StateStopping: true},
+	StatePausing:      {StatePausedHot: true},
+	StatePausedHot:    {StateResuming: true, StateStopping: true, StatePausedWarm: true},
+	StatePausedWarm:   {StateResuming: true, StateArchivedCold: true, StateStopping: true},
+	StateArchivedCold: {StateResuming: true, StateRecycled: true, StateStopping: true},
+	StateRecycled:     {StateStopping: true},
+	StateResuming:     {StateRunning: true},
+	StateStopping:     {StateStopped: true},
 }
 
 // activeStates may always fail.
 var activeStates = map[State]bool{
 	StateStarting: true, StateRunning: true, StatePausing: true,
-	StatePausedHot: true, StateResuming: true, StateStopping: true,
+	StatePausedHot: true, StatePausedWarm: true, StateArchivedCold: true,
+	StateResuming: true, StateStopping: true,
 }
 
 // Terminal reports whether no transition leaves s.
 func (s State) Terminal() bool {
 	return s == StateStopped || s == StateFailed
+}
+
+// Paused reports whether s is a paused/archived tier that a TTL transition
+// or a resume can act on.
+func Paused(s State) bool {
+	return s == StatePausedHot || s == StatePausedWarm || s == StateArchivedCold
 }
 
 // Validate reports whether from→to is a legal transition.
