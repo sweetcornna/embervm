@@ -46,6 +46,14 @@ func (m *mockAgent) ResumeSandbox(_ context.Context, id string) (SandboxStatus, 
 func (m *mockAgent) SnapshotSandbox(_ context.Context, id, tag string) (string, error) {
 	return "snap-" + id + "-" + tag, nil
 }
+func (m *mockAgent) ReleaseLocal(_ context.Context, id string) error { return nil }
+func (m *mockAgent) RestoreSandbox(_ context.Context, id, tier string) (SandboxStatus, error) {
+	return SandboxStatus{SandboxID: id, State: "RUNNING", Netns: "tier-" + tier}, nil
+}
+func (m *mockAgent) ExtractArtifacts(_ context.Context, id string, paths []string) error {
+	return nil
+}
+
 func (m *mockAgent) Exec(_ context.Context, id string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {
 	m.lastExec = req
 	return &guestapi.ExecResponse{ExitCode: 0, Stdout: []byte("ok")}, nil

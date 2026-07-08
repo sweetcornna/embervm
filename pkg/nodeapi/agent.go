@@ -44,6 +44,16 @@ type Agent interface {
 	SnapshotSandbox(ctx context.Context, sandboxID, tag string) (string, error)
 	Status(ctx context.Context, sandboxID string) (SandboxStatus, error)
 
+	// M3 tier verbs (docs/zh/02 §3). ReleaseLocal frees every node-local
+	// resource of a paused sandbox after verifying L1 holds a complete
+	// restore descriptor (HOT→WARM). RestoreSandbox rebuilds a sandbox
+	// from the tier's store ("warm" = L1, "cold" = the cold store) and
+	// resumes it. ExtractArtifacts tars the given guest paths from the
+	// archived disk into the cold store (RECYCLED keeps only those).
+	ReleaseLocal(ctx context.Context, sandboxID string) error
+	RestoreSandbox(ctx context.Context, sandboxID, tier string) (SandboxStatus, error)
+	ExtractArtifacts(ctx context.Context, sandboxID string, paths []string) error
+
 	Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error)
 	Health(ctx context.Context, sandboxID string) (*guestapi.HealthResponse, error)
 	ReadFile(ctx context.Context, sandboxID, path string) ([]byte, error)

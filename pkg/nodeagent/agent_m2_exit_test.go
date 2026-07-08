@@ -233,7 +233,7 @@ func TestCrossNodeRestore(t *testing.T) {
 
 	// --- node B: rebuild from L1 alone ------------------------------------
 	start := time.Now()
-	st, err := nodeB.(*nodeagent.Agent).RestoreSandbox(ctx, id)
+	st, err := nodeB.(*nodeagent.Agent).RestoreSandbox(ctx, id, "warm")
 	if err != nil {
 		t.Fatalf("RestoreSandbox on node B: %v", err)
 	}

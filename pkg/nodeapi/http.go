@@ -29,6 +29,9 @@ func NewServer(a Agent) http.Handler {
 	mux.HandleFunc("POST /sandboxes/{id}/pause", s.pauseSandbox)
 	mux.HandleFunc("POST /sandboxes/{id}/resume", s.resumeSandbox)
 	mux.HandleFunc("POST /sandboxes/{id}/snapshot", s.snapshotSandbox)
+	mux.HandleFunc("POST /sandboxes/{id}/release", s.releaseLocal)
+	mux.HandleFunc("POST /sandboxes/{id}/restore", s.restoreSandbox)
+	mux.HandleFunc("POST /sandboxes/{id}/extract-artifacts", s.extractArtifacts)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.exec)
 	mux.HandleFunc("GET /sandboxes/{id}/health", s.health)
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.readFile)
@@ -127,6 +130,45 @@ func (s *server) snapshotSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"snapshot_id": id})
+}
+
+func (s *server) releaseLocal(w http.ResponseWriter, r *http.Request) {
+	if err := s.agent.ReleaseLocal(r.Context(), r.PathValue("id")); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *server) restoreSandbox(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Tier string `json:"tier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: err.Error()})
+		return
+	}
+	st, err := s.agent.RestoreSandbox(r.Context(), r.PathValue("id"), body.Tier)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *server) extractArtifacts(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: err.Error()})
+		return
+	}
+	if err := s.agent.ExtractArtifacts(r.Context(), r.PathValue("id"), body.Paths); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func (s *server) exec(w http.ResponseWriter, r *http.Request) {
@@ -288,6 +330,22 @@ func (c *Client) SnapshotSandbox(ctx context.Context, sandboxID, tag string) (st
 	err := c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/snapshot", nil,
 		map[string]string{"tag": tag}, &out)
 	return out.SnapshotID, err
+}
+
+func (c *Client) ReleaseLocal(ctx context.Context, sandboxID string) error {
+	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/release", nil, nil, nil)
+}
+
+func (c *Client) RestoreSandbox(ctx context.Context, sandboxID, tier string) (SandboxStatus, error) {
+	var st SandboxStatus
+	err := c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/restore", nil,
+		map[string]string{"tier": tier}, &st)
+	return st, err
+}
+
+func (c *Client) ExtractArtifacts(ctx context.Context, sandboxID string, paths []string) error {
+	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/extract-artifacts", nil,
+		map[string][]string{"paths": paths}, nil)
 }
 
 func (c *Client) Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {

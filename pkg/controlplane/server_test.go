@@ -22,6 +22,11 @@ type cpMockAgent struct {
 }
 
 func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
+func (m *cpMockAgent) ReleaseLocal(context.Context, string) error              { return nil }
+func (m *cpMockAgent) RestoreSandbox(_ context.Context, id, _ string) (nodeapi.SandboxStatus, error) {
+	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING"}, nil
+}
+func (m *cpMockAgent) ExtractArtifacts(context.Context, string, []string) error { return nil }
 func (m *cpMockAgent) CreateSandbox(_ context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
 	if m.createErr != nil {
 		return nodeapi.SandboxStatus{}, m.createErr

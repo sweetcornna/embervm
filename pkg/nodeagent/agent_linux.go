@@ -52,7 +52,12 @@ type sandbox struct {
 	templateID  string
 	dataDiskGiB int
 	mountDir    string              // dataset mountpoint (drive paths live here)
-	layers      []*memsnap.Manifest // chunked snapshot chain, full root first
+	layers      []*memsnap.Manifest // chunked memory chain, full root first
+	diskLayers  []string            // zfs delta chain tags (outlives memory-chain restarts)
+	restoreTier string              // tier the last restore pulled from ("" = local)
+	// forceFullPause roots a fresh Full chain on the next pause (set after
+	// a cold restore: the synthetic-full parent lives in the cold store).
+	forceFullPause bool
 }
 
 // Agent is the concrete linux node agent.
@@ -62,6 +67,7 @@ type Agent struct {
 	sbx        map[string]*sandbox
 	localStore *chunkstore.Dir    // node-local chunk cache (chunked mode)
 	l1         chunkstore.Backend // optional L1 object store (EMBERVM_L1_*)
+	cold       chunkstore.Backend // optional cold-tier store (EMBERVM_COLD_*)
 }
 
 var _ nodeapi.Agent = (*Agent)(nil)
@@ -104,6 +110,13 @@ func New(cfg Config) (nodeapi.Agent, error) {
 		}
 		if ok {
 			a.l1 = l1
+		}
+		cold, ok, err := chunkstore.ColdFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			a.cold = cold
 		}
 	}
 	return a, nil
@@ -302,6 +315,9 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 			"--store", a.cfg.ChunkStoreDir,
 			"--ws", sb.wsPath(),
 			"--parent-pid", strconv.Itoa(os.Getpid()))
+		// A cold-tier restore serves faults from the cold store: re-point
+		// the handler's L1 fallback there (nil env = inherit for warm/hot).
+		uffd.Env = handlerEnvForTier(sb.restoreTier)
 	} else {
 		uffd = exec.Command(a.cfg.UffdHandlerBin,
 			"--socket", uffdSock,
