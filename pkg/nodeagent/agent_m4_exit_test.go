@@ -533,36 +533,21 @@ func TestClusterKillNode(t *testing.T) {
 	t.Logf("healthy nodes' paused sandboxes hot-resumed in place")
 
 	// --- gateway proxy in-flow through both hops ------------------------------
-	// The recovered guest serves HTTP; the apiserver proxies through the node
-	// daemon's unix socket into the netns (split mode, WebSocket-transparent).
-	var ex struct {
-		ExitCode int `json:"exit_code"`
-	}
-	if code := a.do("POST", "/v0/sandboxes/"+running.ID+"/exec", map[string]any{
-		"cmd": "sh", "args": []string{"-c", "mkdir -p /www && echo gateway-ok > /www/index.html && busybox httpd -p 8080 -h /www"},
-		"timeout_s": 30,
-	}, &ex); code/100 != 2 || ex.ExitCode != 0 {
-		t.Fatalf("start guest httpd: HTTP %d exit %d", code, ex.ExitCode)
-	}
+	// Proxy an HTTP GET to a port inside the RECOVERED guest: apiserver →
+	// node daemon unix socket → netns dial (split mode). The target is
+	// guestd's own :7777 /healthz — present in every EmberVM guest, no
+	// dependency on what the template image bundles.
 	req, _ := http.NewRequest(http.MethodGet,
-		srv.URL+"/v0/sandboxes/"+running.ID+"/proxy/8080/index.html", nil)
+		srv.URL+"/v0/sandboxes/"+running.ID+"/proxy/7777/healthz", nil)
 	req.Header.Set("Authorization", "Bearer "+controlplane.DevTokenName)
-	var body string
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) { // httpd startup race: retry briefly
-		resp, err := srv.Client().Do(req)
-		if err == nil {
-			data, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				body = string(data)
-				break
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("gateway proxy: %v", err)
 	}
-	if strings.TrimSpace(body) != "gateway-ok" {
-		t.Fatalf("gateway proxy body = %q, want gateway-ok", body)
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(data), `"ok":true`) {
+		t.Fatalf("gateway proxy = HTTP %d %q, want guestd health through both hops", resp.StatusCode, data)
 	}
 	t.Logf("gateway proxy verified through both hops on the recovered sandbox")
 }
