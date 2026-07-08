@@ -62,6 +62,14 @@ func m5Stack(t *testing.T, subtree string, poolSize int) *api {
 	}
 	t.Cleanup(func() { _ = npool.Teardown(context.Background()) })
 
+	// Short jail base OUTSIDE t.TempDir(): the jailed API socket's host path
+	// (<base>/firecracker/<uuid>/root/run/firecracker.socket) must fit the
+	// 108-byte unix sun_path limit — launchFC validates loudly. Leaked
+	// deliberately; the CI runner is ephemeral.
+	jailBase, err := os.MkdirTemp("", "j")
+	if err != nil {
+		t.Fatal(err)
+	}
 	agent, err := nodeagent.New(nodeagent.Config{
 		Storage:          storage.NewZFSBackend(pool + "/" + subtree),
 		Pool:             npool,
@@ -73,7 +81,7 @@ func m5Stack(t *testing.T, subtree string, poolSize int) *api {
 		GuestdBin:        os.Getenv("EMBERVM_GUESTD_BIN"),
 		RestoreMode:      "chunked",
 		JailerBin:        jailerBin,
-		JailerChrootBase: t.TempDir(),
+		JailerChrootBase: jailBase,
 		FCVersion:        os.Getenv("FC_VERSION"),
 		KernelVersion:    "6.1.155",
 	})
