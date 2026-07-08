@@ -1,0 +1,149 @@
+name: e2e-m4
+
+# M4 exit-criteria gates (docs/zh/03 §3): 创建<500ms (golden fast-create),
+# 50 并发/节点, and THE gate — a 3-node cluster (three jailed nodeagent
+# daemons over unix sockets) where kill -9 of any worker leaves every sandbox
+# recoverable on another node, gateway proxy exercised in-flow. Jailed
+# lifecycle + watchdog gates run in integration-kvm. Latencies are
+# CI-relative per docs/adr/0001.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  exit-criteria:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      FC_VERSION: v1.16.1
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: embervm
+          POSTGRES_PASSWORD: embervm
+          POSTGRES_DB: embervm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle || true
+          for _ in $(seq 1 30); do test -w /dev/kvm && break; sleep 1; done
+          test -w /dev/kvm
+
+      - name: Enable unprivileged userfaultfd
+        run: sudo sysctl -w vm.unprivileged_userfaultfd=1
+
+      - name: Install dependencies (zfs userland is NOT preinstalled)
+        run: sudo apt-get update && sudo apt-get install -y jq e2fsprogs zfsutils-linux
+
+      - name: Free runner disk space
+        run: bash scripts/ci-free-disk.sh
+
+      - name: Create loopback ZFS pool
+        run: |
+          truncate -s 12G /var/tmp/embervm-m4.img
+          sudo zpool create -f embervm-m4 /var/tmp/embervm-m4.img
+          sudo zfs list embervm-m4
+
+      - name: Start MinIO (warm L1 bucket)
+        run: |
+          curl -fsSL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+          sudo install -m 0755 /tmp/minio /usr/local/bin/minio
+          curl -fsSL -o /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          sudo install -m 0755 /tmp/mc /usr/local/bin/mc
+          mkdir -p /tmp/minio-data
+          MINIO_ROOT_USER=embervm-ci MINIO_ROOT_PASSWORD=embervm-ci-secret \
+            nohup minio server /tmp/minio-data --address 127.0.0.1:9000 >/tmp/minio.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+          curl -sf http://127.0.0.1:9000/minio/health/live
+          mc alias set l1 http://127.0.0.1:9000 embervm-ci embervm-ci-secret
+          mc mb l1/embervm-warm
+
+      - name: Cache assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-v1.16.1-${{ hashFiles('scripts/assets.sha256') }}
+
+      - name: Build host binaries
+        run: make build
+
+      - name: Fetch assets
+        run: sudo -E env "PATH=$PATH" FC_VERSION=v1.16.1 bash scripts/fetch-assets.sh
+
+      - name: G4 gates — golden fast-create <500ms + 50 concurrency/node
+        env:
+          EMBERVM_KVM_TESTS: "1"
+          EMBERVM_KERNEL: ${{ github.workspace }}/assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_JAILER_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/jailer-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: ${{ github.workspace }}/bin/uffd-handler
+          EMBERVM_GUESTD_BIN: ${{ github.workspace }}/bin/guestd
+          EMBERVM_SCRIPT_DIR: ${{ github.workspace }}/scripts
+          EMBERVM_ZFS_POOL: embervm-m4
+          EMBERVM_L1_ENDPOINT: 127.0.0.1:9000
+          EMBERVM_L1_BUCKET: embervm-warm
+          EMBERVM_L1_ACCESS_KEY: embervm-ci
+          EMBERVM_L1_SECRET_KEY: embervm-ci-secret
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" \
+            go test ./pkg/nodeagent/ -run 'TestFastCreateUnder500ms|TestConcurrency50' -v -count=1 -timeout 30m \
+            | tee /tmp/m4-g4.log
+          for t in TestFastCreateUnder500ms TestConcurrency50; do
+            grep -q -- "--- PASS: $t" /tmp/m4-g4.log \
+              || { echo "::error::$t did not PASS (skipped?)"; exit 1; }
+          done
+
+      - name: THE exit gate — 3-node cluster, kill -9 a worker, cross-node recovery + gateway proxy
+        env:
+          EMBERVM_KVM_TESTS: "1"
+          EMBERVM_KERNEL: ${{ github.workspace }}/assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_JAILER_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/jailer-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: ${{ github.workspace }}/bin/uffd-handler
+          EMBERVM_GUESTD_BIN: ${{ github.workspace }}/bin/guestd
+          EMBERVM_NODEAGENT_BIN: ${{ github.workspace }}/bin/nodeagent
+          EMBERVM_SCRIPT_DIR: ${{ github.workspace }}/scripts
+          EMBERVM_ZFS_POOL: embervm-m4
+          EMBERVM_L1_ENDPOINT: 127.0.0.1:9000
+          EMBERVM_L1_BUCKET: embervm-warm
+          EMBERVM_L1_ACCESS_KEY: embervm-ci
+          EMBERVM_L1_SECRET_KEY: embervm-ci-secret
+          EMBERVM_PG_TESTS: "1"
+          EMBERVM_TEST_DATABASE_URL: postgres://embervm:embervm@localhost:5432/embervm?sslmode=disable
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" \
+            go test ./pkg/nodeagent/ -run 'TestClusterKillNode' -v -count=1 -timeout 30m \
+            | tee /tmp/m4-cluster.log
+          grep -q -- '--- PASS: TestClusterKillNode' /tmp/m4-cluster.log \
+            || { echo "::error::TestClusterKillNode did not PASS (skipped?)"; exit 1; }
+
+      - name: Report measured numbers
+        if: always()
+        run: |
+          grep -E "fast-create to interactive|concurrent sandboxes|victim node|evicted|restored on another node|RPO verified|gateway proxy verified" /tmp/m4-g4.log /tmp/m4-cluster.log 2>/dev/null || true
+
+      - name: Upload logs on failure
+        if: failure()
+        run: sudo chmod -R a+rX /tmp 2>/dev/null || true

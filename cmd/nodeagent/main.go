@@ -39,8 +39,14 @@ func main() {
 		fcBin       = flag.String("fc-bin", "firecracker", "firecracker binary")
 		uffdBin     = flag.String("uffd-handler", "uffd-handler", "uffd handler binary")
 		guestdBin   = flag.String("guestd-bin", "", "guestd binary to inject into templates")
-		restoreMode = flag.String("restore-mode", "prefetch", "uffd restore mode: prefetch|lazy|file")
+		restoreMode = flag.String("restore-mode", "prefetch", "uffd restore mode: chunked|prefetch|lazy|file")
 		watchdog    = flag.Duration("watchdog-interval", 5*time.Second, "zombie-reaper scan interval (0 disables)")
+		chunkDir    = flag.String("chunk-store-dir", "", "node-local chunk cache for --restore-mode=chunked (default <work-dir>/chunks)")
+		capacity    = flag.Int("capacity-mib", 0, "memory the scheduler may pack onto this node (0 = unlimited)")
+		fcVersion   = flag.String("fc-version", "", "firecracker version stamped into snapshot manifests")
+		kernelVer   = flag.String("kernel-version", "", "guest kernel version stamped into snapshot manifests")
+		jailerBin   = flag.String("jailer-bin", "", "jailer binary; enables chroot+uid/gid+seccomp hardening when set")
+		jailRoot    = flag.String("jailer-chroot-base", "/srv/jailer", "jailer chroot base directory")
 	)
 	flag.Parse()
 
@@ -71,6 +77,12 @@ func main() {
 		GuestdBin:        *guestdBin,
 		RestoreMode:      *restoreMode,
 		WatchdogInterval: *watchdog,
+		ChunkStoreDir:    *chunkDir,
+		CapacityMiB:      *capacity,
+		FCVersion:        *fcVersion,
+		KernelVersion:    *kernelVer,
+		JailerBin:        *jailerBin,
+		JailerChrootBase: *jailRoot,
 	})
 	if err != nil {
 		log.Fatalf("nodeagent: %v", err)

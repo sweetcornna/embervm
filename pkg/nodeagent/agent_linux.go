@@ -195,6 +195,11 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	m := lifecycle.New(lifecycle.StatePending)
 	_ = m.To(lifecycle.StateStarting)
 
+	// The scheduler may place a create on a node that never built the
+	// template — pull the published stream from L1 first.
+	if err := a.ensureTemplate(ctx, req.TemplateID); err != nil {
+		return nodeapi.SandboxStatus{}, fmt.Errorf("receive template %s: %w", req.TemplateID, err)
+	}
 	paths, err := a.cfg.Storage.CloneSandbox(ctx, req.SandboxID, req.TemplateID, req.DataDiskGiB)
 	if err != nil {
 		return nodeapi.SandboxStatus{}, err

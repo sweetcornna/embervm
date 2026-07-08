@@ -62,6 +62,15 @@ func (b *ZFSBackend) Paths(sandboxID string) SandboxPaths {
 	}
 }
 
+// HasTemplate implements TemplateChecker: cloneable means @final exists
+// (ReceiveTemplate's own idempotency key).
+func (b *ZFSBackend) HasTemplate(ctx context.Context, templateID string) bool {
+	if validateID("template", templateID) != nil {
+		return false
+	}
+	return b.datasetExists(ctx, b.templateDS(templateID)+"@final")
+}
+
 // EnsureTemplate implements Backend.
 func (b *ZFSBackend) EnsureTemplate(ctx context.Context, templateID, rootfsExt4Src string) error {
 	if err := validateID("template", templateID); err != nil {

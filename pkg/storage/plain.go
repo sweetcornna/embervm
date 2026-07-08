@@ -41,6 +41,12 @@ func (b *PlainBackend) Paths(sandboxID string) SandboxPaths {
 	}
 }
 
+// HasTemplate implements TemplateChecker.
+func (b *PlainBackend) HasTemplate(_ context.Context, templateID string) bool {
+	_, err := os.Stat(b.templateRootfs(templateID))
+	return err == nil
+}
+
 // EnsureTemplate implements Backend.
 func (b *PlainBackend) EnsureTemplate(_ context.Context, templateID, rootfsExt4Src string) error {
 	if err := validateID("template", templateID); err != nil {

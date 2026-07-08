@@ -46,6 +46,14 @@ type Backend interface {
 	DestroySandbox(ctx context.Context, sandboxID string) error
 }
 
+// TemplateChecker is the optional cheap local-presence probe behind M4's
+// multi-node create: a node the scheduler picked may never have built the
+// template, and the agent must know whether to receive the published stream
+// from L1 before cloning — without fetching it just to find out.
+type TemplateChecker interface {
+	HasTemplate(ctx context.Context, templateID string) bool
+}
+
 // idRE constrains IDs to safe dataset/path components.
 var idRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 

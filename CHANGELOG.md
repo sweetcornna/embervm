@@ -8,6 +8,65 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+## [v0.4.0-m4] — 2026-07-09 — Elasticity & production hardening (M4) — **the open-source v0.1 release**
+
+One node became a 3-node cluster you can lose a worker from: multi-node
+scheduling with polled heartbeats and eviction, jailer-hardened Firecracker,
+sub-500ms golden fast-create, 50 sandboxes per node, a WebSocket-transparent
+gateway proxy, netns-level egress policy, and Prometheus observability.
+G1–G6 acceptance: [docs/acceptance-v0.1.md](docs/acceptance-v0.1.md);
+decisions: [ADR-0005](docs/adr/0005-m4-elasticity-hardening.md).
+
+### Added
+
+- **Multi-node scheduler** (`pkg/controlplane/scheduler.go`) — `nodes`
+  registry in PostgreSQL, static membership (`apiserver --nodes
+  id=socket,...` / `EMBERVM_NODES`), polled `Healthz` heartbeats with
+  miss-threshold eviction (dead node's RUNNING sandboxes → FAILED, restore
+  on demand), sticky-then-bin-pack placement budgeted on memory ×
+  `MemOvercommit` and vCPUs × cores × `CPUOvercommit` (default 3x).
+  `sandboxes.node_id` is the routing table.
+- **Jailer hardening** — every Firecracker under chroot + per-VM uid/gid +
+  netns + default seccomp; snapshot drive paths become chroot-relative,
+  which retires M3's mountpoint pinning on jailed restores and unlocks
+  fast-create (`--jailer-bin` on the node daemon).
+- **Golden fast-create** — template build parks a paused golden sandbox;
+  geometry-matched creates `zfs clone` it and hot-restore the memory image
+  instead of cold-booting (P50 <500ms gate). Creates on nodes that never
+  built the template receive the stream from L1 on demand.
+- **Balloon + oversell** — virtio-balloon on boot, `SetBalloon` verb,
+  balloon-assisted pause (`PauseBalloonSettle`); `TestConcurrency50` gates
+  50 × 256 MiB on one node.
+- **Zombie watchdog (G5)** — wait4(WNOHANG)-probed child liveness; a dead
+  FC or uffd handler force-FAILs the sandbox, releases everything, and
+  writes through to the control plane on the next heartbeat.
+- **Gateway proxy** — `ANY /v0/sandboxes/{id}/proxy/{port}/*path`, two
+  chained WebSocket-transparent reverse proxies (apiserver → node daemon
+  unix socket → guest netns); owner-scoped.
+- **Egress policy** — `POST /v0/sandboxes {"egress": "nat"|"none"}`;
+  `none` blocks guest-originated forwarding at the root netns while the
+  gateway and guestd keep working; persists across tiering and cross-node
+  restore via the snapshot descriptor. (The zero-trust L7 egress proxy is
+  deferred past v0.1 — ADR-0005.)
+- **Prometheus observability** — `/metrics` on the API server and the node
+  daemon socket: restore/create latency histograms (by tier/path),
+  lifecycle transitions, chunk ops, proxy results, watchdog reaps, nodes-up,
+  engine tick errors; starter dashboard in `deploy/grafana/embervm.json`.
+- **e2e-m4 workflow** — THE exit gate `TestClusterKillNode` (3 jailed
+  daemons, kill -9, eviction, cross-node recovery with continuity, RPO
+  verified both ways, gateway proxied in-flow) + fast-create/concurrency
+  gates.
+
+### Changed
+
+- `SnapshotDescriptor` gains `egress` (additive; old descriptors read as
+  default NAT).
+- `cmd/nodeagent` gains `--chunk-store-dir`, `--capacity-mib`,
+  `--netns-base`, `--fc-version`, `--kernel-version`, `--jailer-bin`,
+  `--jailer-chroot-base`.
+- Jailed restores no longer pin the dataset mountpoint (chroot-relative
+  paths hold on any node); the unjailed dev path keeps the M3 pinning.
+
 ## [v0.3.0-m3] — 2026-07-08 — Tiered archive & lifecycle engine (M3)
 
 Paused sandboxes now decay automatically through storage tiers on

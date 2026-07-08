@@ -194,6 +194,25 @@ func (a *Agent) pushL1(ctx context.Context, sb *sandbox, m *memsnap.Manifest, la
 	return a.l1.PutObject(ctx, KeySnapshotJSON(sb.id), bytes.NewReader(data), int64(len(data)))
 }
 
+// ensureTemplate makes the template locally cloneable, receiving the
+// published stream from L1 when this node never built it (M4 multi-node
+// create — the scheduler places sandboxes on any node; GUID lineage means
+// every node must clone off the SAME stream). No-op when the template is
+// already local or the node has no L1/replication (single-node shape:
+// CloneSandbox surfaces the miss).
+func (a *Agent) ensureTemplate(ctx context.Context, templateID string) error {
+	if chk, ok := a.cfg.Storage.(storage.TemplateChecker); ok && chk.HasTemplate(ctx, templateID) {
+		return nil
+	}
+	repl, ok := a.cfg.Storage.(storage.Replicator)
+	if !ok || a.l1 == nil {
+		return nil
+	}
+	return a.receiveObject(ctx, KeyTemplateStream(templateID), func(r io.Reader) error {
+		return repl.ReceiveTemplate(ctx, templateID, r)
+	})
+}
+
 // pushTemplateL1 publishes the template dataset stream once (GUID lineage:
 // receiving nodes must clone off THIS stream, not a local rebuild).
 func (a *Agent) pushTemplateL1(ctx context.Context, templateID string) error {
@@ -273,8 +292,16 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: receive %s: %w", sandboxID, layer, err)
 		}
 	}
-	// The snapfile records absolute drive paths from the origin node.
-	if err := repl.SetSandboxMountpoint(ctx, sandboxID, desc.Dir); err != nil {
+	// The snapfile records drive paths from the origin node. Jailed origins
+	// record chroot-relative paths (/data/..., ADR-0005 D3) that hold on any
+	// node — the local dataset simply binds into the new chroot, and pinning
+	// the origin's mountpoint here would collide with the origin's own
+	// still-mounted dataset when both subtrees share a host (the CI
+	// cluster). Unjailed origins keep the M3 absolute-path pinning.
+	dir := desc.Dir
+	if a.jailed() {
+		dir = a.cfg.Storage.Paths(sandboxID).Dir
+	} else if err := repl.SetSandboxMountpoint(ctx, sandboxID, desc.Dir); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
 
@@ -290,9 +317,9 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		memMiB:      desc.MemoryMiB,
 		templateID:  desc.TemplateID,
 		dataDiskGiB: desc.DataDiskGiB,
-		mountDir:    desc.Dir,
-		rootfs:      filepath.Join(desc.Dir, "rootfs.ext4"),
-		dataRaw:     filepath.Join(desc.Dir, "data.raw"),
+		mountDir:    dir,
+		rootfs:      filepath.Join(dir, "rootfs.ext4"),
+		dataRaw:     filepath.Join(dir, "data.raw"),
 		snapCount:   snapSeq,
 		diskLayers:  diskLayers,
 		diskOrigin:  desc.DiskOrigin,
