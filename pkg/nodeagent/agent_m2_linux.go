@@ -51,11 +51,11 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 		snapType = "Diff"
 	}
 
-	c := fcclient.New(filepath.Join(sb.dir, "fc.sock"))
+	c := fcclient.New(a.fcAPISock(sb))
 	if err := c.CreateSnapshot(ctx, fcclient.SnapshotCreate{
 		SnapshotType: snapType,
-		SnapshotPath: sb.snapfile(layerID),
-		MemFilePath:  memfile,
+		SnapshotPath: a.fcSnapPath(sb, "snapfile-"+layerID),
+		MemFilePath:  a.fcSnapPath(sb, "memfile-"+layerID),
 	}); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -39,7 +40,15 @@ const LocalNodeID = "local"
 // selective restore then answer 503 for tiers they cannot see.
 func NewServer(store *Store, agent nodeapi.Agent, tokens *TokenStore, l1, cold chunkstore.ListingBackend) *Server {
 	registry := NewRegistry(map[string]nodeapi.Agent{LocalNodeID: agent})
-	return NewClusterServer(store, registry, NewScheduler(store, registry, SchedulerConfig{}), tokens, l1, cold)
+	sched := NewScheduler(store, registry, SchedulerConfig{})
+	// Single-node deployments have no separate cluster bootstrap: register
+	// the implicit local node here (unlimited capacity, no liveness poll —
+	// the node IS the process serving this request).
+	if err := sched.RegisterNodes(context.Background(),
+		map[string]string{LocalNodeID: ""}, map[string]int{LocalNodeID: 0}); err != nil {
+		log.Printf("controlplane: register local node: %v", err)
+	}
+	return NewClusterServer(store, registry, sched, tokens, l1, cold)
 }
 
 // NewClusterServer wires a multi-node control plane (M4): agents resolve

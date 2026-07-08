@@ -48,6 +48,9 @@ func (a *Agent) ReleaseLocal(ctx context.Context, sandboxID string) error {
 
 	a.killFC(sb)
 	a.killUffd(sb)
+	if a.jailed() {
+		a.teardownJail(sb)
+	}
 	a.removeCgroup(sb.id)
 	sb.lease.Release()
 	if err := a.cfg.Storage.DestroySandbox(ctx, sandboxID); err != nil {

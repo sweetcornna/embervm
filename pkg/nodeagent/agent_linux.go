@@ -91,6 +91,14 @@ func New(cfg Config) (nodeapi.Agent, error) {
 	if cfg.BootExtraArgs == "" {
 		cfg.BootExtraArgs = defaultExtraArgs
 	}
+	if cfg.JailerChrootBase == "" {
+		cfg.JailerChrootBase = "/srv/jailer"
+	}
+	if cfg.JailerBin != "" && cfg.RestoreMode != "chunked" {
+		// The M1 raw-memfile paths predate chroot-relative path handling;
+		// hardened deployments use the M2+ pipeline.
+		return nil, fmt.Errorf("nodeagent: jailer requires restore_mode=chunked")
+	}
 	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -203,24 +211,50 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	return a.statusLocked(sb), nil
 }
 
-// bootFresh starts a Firecracker process in the sandbox netns and drives the
-// full boot API sequence.
-func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
-	apiSock := filepath.Join(sb.dir, "fc.sock")
+// launchFC starts the Firecracker process — jailed (chroot + uid/gid +
+// netns + seccomp) when a jailer is configured, plain otherwise — and
+// returns the API socket path.
+func (a *Agent) launchFC(sb *sandbox, logName string) (string, error) {
+	apiSock := a.fcAPISock(sb)
 	_ = os.Remove(apiSock)
-	fc := exec.Command("ip", "netns", "exec", sb.lease.Netns,
-		a.cfg.FCBin, "--api-sock", apiSock)
-	logf, _ := os.Create(filepath.Join(sb.dir, "fc.log"))
+	var fc *exec.Cmd
+	if a.jailed() {
+		if err := a.buildJail(sb); err != nil {
+			return "", fmt.Errorf("build jail: %w", err)
+		}
+		fc = a.jailerCommand(sb)
+	} else {
+		fc = exec.Command("ip", "netns", "exec", sb.lease.Netns,
+			a.cfg.FCBin, "--api-sock", apiSock)
+	}
+	logf, _ := os.Create(filepath.Join(sb.dir, logName))
 	if logf != nil {
 		fc.Stdout, fc.Stderr = logf, logf
 	}
 	if err := fc.Start(); err != nil {
-		return fmt.Errorf("start firecracker: %w", err)
+		return "", fmt.Errorf("start firecracker: %w", err)
 	}
 	sb.fc = fc
 	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
-
 	if err := waitSocket(apiSock, 5*time.Second); err != nil {
+		return "", err
+	}
+	return apiSock, nil
+}
+
+// fcKernelPath is the kernel path as Firecracker sees it.
+func (a *Agent) fcKernelPath() string {
+	if a.jailed() {
+		return "/vmlinux"
+	}
+	return a.cfg.KernelPath
+}
+
+// bootFresh starts a Firecracker process in the sandbox netns and drives the
+// full boot API sequence.
+func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
+	apiSock, err := a.launchFC(sb, "fc.log")
+	if err != nil {
 		return err
 	}
 	c := fcclient.New(apiSock)
@@ -233,13 +267,13 @@ func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
 			})
 		},
 		func() error {
-			return c.PutBootSource(ctx, fcclient.BootSource{KernelImagePath: a.cfg.KernelPath, BootArgs: bootArgs})
+			return c.PutBootSource(ctx, fcclient.BootSource{KernelImagePath: a.fcKernelPath(), BootArgs: bootArgs})
 		},
 		func() error {
-			return c.PutDrive(ctx, fcclient.Drive{DriveID: "rootfs", PathOnHost: sb.rootfs, IsRootDevice: true})
+			return c.PutDrive(ctx, fcclient.Drive{DriveID: "rootfs", PathOnHost: a.fcDrivePath(sb, sb.rootfs), IsRootDevice: true})
 		},
 		func() error {
-			return c.PutDrive(ctx, fcclient.Drive{DriveID: "data", PathOnHost: sb.dataRaw})
+			return c.PutDrive(ctx, fcclient.Drive{DriveID: "data", PathOnHost: a.fcDrivePath(sb, sb.dataRaw)})
 		},
 		func() error {
 			return c.PutNetworkInterface(ctx, fcclient.NetworkInterface{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: "tap0"})
@@ -264,8 +298,7 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 	if err := sb.machine.To(lifecycle.StatePausing); err != nil {
 		return err
 	}
-	apiSock := filepath.Join(sb.dir, "fc.sock")
-	c := fcclient.New(apiSock)
+	c := fcclient.New(a.fcAPISock(sb))
 	if err := c.PatchVMState(ctx, "Paused"); err != nil {
 		return err
 	}
@@ -336,21 +369,17 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 	if err := waitSocket(uffdSock, 5*time.Second); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
+	// The handler runs as root; a jailed Firecracker connects as its own
+	// uid and needs write permission on the socket inode.
+	if a.jailed() {
+		if err := os.Chmod(uffdSock, 0o666); err != nil {
+			return nodeapi.SandboxStatus{}, err
+		}
+	}
 
-	apiSock := filepath.Join(sb.dir, "fc.sock")
-	_ = os.Remove(apiSock)
-	fc := exec.Command("ip", "netns", "exec", sb.lease.Netns, a.cfg.FCBin, "--api-sock", apiSock)
-	flog, _ := os.Create(filepath.Join(sb.dir, "fc-resume.log"))
-	if flog != nil {
-		fc.Stdout, fc.Stderr = flog, flog
-	}
-	if err := fc.Start(); err != nil {
+	apiSock, err := a.launchFC(sb, "fc-resume.log")
+	if err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("start firecracker (resume): %w", err)
-	}
-	sb.fc = fc
-	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
-	if err := waitSocket(apiSock, 5*time.Second); err != nil {
-		return nodeapi.SandboxStatus{}, err
 	}
 
 	c := fcclient.New(apiSock)
@@ -360,7 +389,8 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 		ResumeVM:     true,
 	}
 	if a.chunked() {
-		load.SnapshotPath = sb.snapfile(sb.snapLayer)
+		load.SnapshotPath = a.fcSnapPath(sb, "snapfile-"+sb.snapLayer)
+		load.MemBackend.BackendPath = a.fcSnapPath(sb, "uffd.sock")
 		load.TrackDirtyPages = true // keep Diff pauses possible after restore
 		load.ClockRealtime = true   // 校时: re-arm the guest realtime clock
 	}
@@ -549,6 +579,9 @@ func (a *Agent) killUffd(sb *sandbox) {
 func (a *Agent) cleanup(ctx context.Context, sb *sandbox) {
 	a.killFC(sb)
 	a.killUffd(sb)
+	if a.jailed() {
+		a.teardownJail(sb)
+	}
 	a.removeCgroup(sb.id)
 	sb.lease.Release()
 	_ = a.cfg.Storage.DestroySandbox(ctx, sb.id)

@@ -36,6 +36,13 @@ type Config struct {
 	// (0 = unlimited, single-node dev).
 	CapacityMiB int
 
+	// JailerBin enables jailer hardening when set (chroot + per-VM uid/gid
+	// + netns + default seccomp, docs/zh/04 §5). Snapshot paths become
+	// chroot-relative. Empty = unjailed (dev / M1-M3 compatibility).
+	JailerBin        string
+	JailerChrootBase string // default /srv/jailer
+	JailUIDBase      int    // per-VM uid = base + netns slot; default 30000
+
 	// BootExtraArgs is appended to the guest kernel command line; defaults to
 	// the docs/zh/04 §5 microVM args.
 	BootExtraArgs string
