@@ -237,7 +237,9 @@ func (a *Agent) ExtractArtifacts(ctx context.Context, sandboxID string, paths []
 		}
 	}()
 
-	return a.putStream(ctx, KeyArtifacts(sandboxID), func(w io.Writer) error {
+	// The tarball is the RECYCLED remnant and lives in the COLD store —
+	// the engine's prune keeps exactly this key there.
+	return putStreamTo(ctx, a.cold, KeyArtifacts(sandboxID), func(w io.Writer) error {
 		return writeArtifactsTar(w, mounts, paths)
 	})
 }

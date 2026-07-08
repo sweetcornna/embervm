@@ -372,8 +372,13 @@ func (a *Agent) putFile(ctx context.Context, key, path string) error {
 	return a.l1.PutObject(ctx, key, f, st.Size())
 }
 
-// putStream uploads producer output without a temp file.
+// putStream uploads producer output to L1 without a temp file.
 func (a *Agent) putStream(ctx context.Context, key string, produce func(io.Writer) error) error {
+	return putStreamTo(ctx, a.l1, key, produce)
+}
+
+// putStreamTo uploads producer output to an explicit store.
+func putStreamTo(ctx context.Context, dst chunkstore.Objects, key string, produce func(io.Writer) error) error {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
@@ -381,7 +386,7 @@ func (a *Agent) putStream(ctx context.Context, key string, produce func(io.Write
 		pw.CloseWithError(err)
 		done <- err
 	}()
-	putErr := a.l1.PutObject(ctx, key, pr, -1)
+	putErr := dst.PutObject(ctx, key, pr, -1)
 	produceErr := <-done
 	if produceErr != nil {
 		return produceErr
