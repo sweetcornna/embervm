@@ -68,7 +68,7 @@ Firecracker 需要 `/dev/kvm`（裸金属或嵌套虚拟化）。已核实矩阵
 - [x] M0（第 1-2 周）：裸金属 + 嵌套虚拟化双环境；Firecracker/ZFS/uffd 原型基线（补齐《04》§9 数据缺口）（已完成：CI 嵌套虚拟化环境基线；裸金属复测待 M1）
 - [x] M1（第 3-6 周）：单机 MVP——REST 全生命周期 API + PostgreSQL、模板构建器（Docker 镜像 → microVM）、guestd、ZFS 集成、`embervm dev` 单进程模式（[单机快速上手](deploy/singlenode/README.md)；退出标准——20 并发、热恢复 <1s（含 15GB 数据盘）、单命令部署——已在嵌套虚拟化 CI 验证，裸金属复测待跟进）
 - [x] M2（第 7-10 周）：秒级恢复管道——chunk 化 lz4 快照（内容寻址、零页跳过）、工作集记录 + 预取（REAP/FaaSnap）、Full→Diff 分层链、S3 chunk 仓库 + pause 写穿、异机恢复（[ADR-0003](docs/adr/0003-m2-restore-pipeline.md)；退出标准——热恢复 P50 <500ms、温恢复 P99 <3s、pause→上传→异机 resume——嵌套虚拟化 CI 验证，裸金属复测仍为跟踪项）
-- [ ] M3（第 11-13 周）：分层归档与生命周期引擎、选择性恢复
+- [x] M3（第 11-13 周）：分层归档与生命周期引擎——TTL 驱动 HOT→WARM→COLD→RECYCLED、synthetic full 合并 + chunk GC、唤醒直方图预热、仅 artifacts 的选择性恢复、每沙箱成本报表（[ADR-0004](docs/adr/0004-m3-archive-lifecycle.md)；退出标准——冷归档恢复 <10s 可交互、归档成本门禁——嵌套虚拟化 CI 验证）
 - [ ] M4（第 14-16 周）：多节点调度、Gateway、加固 → 内部 MVP
 - [ ] M5（可选）：面向 Agent 的 VM fork/branch API（tree-of-thought / RL rollout / time-travel 调试）
 

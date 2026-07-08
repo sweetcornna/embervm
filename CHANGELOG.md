@@ -8,6 +8,75 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+## [v0.3.0-m3] — 2026-07-08 — Tiered archive & lifecycle engine (M3)
+
+Paused sandboxes now decay automatically through storage tiers on
+operator-set TTLs — HOT → WARM → COLD → RECYCLED — with resume from every
+tier, wake-prediction pre-warming, artifacts-only recycling, and a
+per-sandbox cost report.
+
+### Added
+
+- **Lifecycle engine** (`pkg/controlplane/engine.go`) — scans PostgreSQL
+  on a tick and drives TTL transitions (`EMBERVM_TTL_WARM/COLD/RECYCLE`;
+  zero disables). Race discipline: CAS-then-act — a user resume racing a
+  demotion loses cleanly on the from-state; failing tier actions mark the
+  sandbox FAILED, never silently retried. TTLs measure time in the
+  current tier.
+- **WARM** — `ReleaseLocal` frees the dataset, workdir, and netns lease
+  after verifying L1 holds the restore descriptor (refused otherwise:
+  that would be data loss, not tiering).
+- **COLD** — a store-only archive: the memory chain compacts into a
+  **synthetic full manifest** (`memsnap.Synthesize`, metadata-only —
+  chunks are content-addressed, so zero bytes move; this retires the M2
+  "diff chains grow unboundedly" debt and cold restores read exactly one
+  memory layer); referenced chunks copy to the `EMBERVM_COLD_*` store via
+  the dedup Copier; the L1 copy is deleted and swept by the new
+  **mark-and-sweep chunk GC** (manifest-rooted, grace-windowed so
+  in-flight pauses are safe).
+- **RECYCLED** — `ExtractArtifacts` receives the archived disk chain,
+  loop-mounts it read-only, and tars the sandbox's `artifact_paths` into
+  `artifacts.tar.zst` (zstd); everything else is pruned and GC'd.
+  `POST /v0/sandboxes/{id}/restore-artifacts` seeds a NEW sandbox from
+  those artifacts (Manus-style selective restore).
+- **Tier-aware resume** — `POST .../resume` transparently restores from
+  L1 (WARM) or the cold store (COLD, uffd handler env re-pointed); a cold
+  restore forces the next pause to root a fresh Full chain (the
+  synthetic-full parent lives in L2 — one chain, one store), while the
+  zfs disk delta chain continues across memory-chain restarts
+  (descriptors grew `tier`/`disk_layers`/`snap_seq`).
+- **Pre-warm prediction** (`pkg/prewarm`) — Serverless-in-the-Wild
+  histogram policy over pause→resume intervals (P5 window, ≥3 samples,
+  CV ≤ 2 — otherwise the TTLs act as fixed keep-alive); the engine pulls
+  WS chunks node-local through the new `Prewarm` verb ahead of the
+  predicted wake. Advisory: failures never block the scan.
+- **Cost report** (成本报表) — `GET /v0/sandboxes/{id}/storage` and
+  `GET /v0/storage-report`: logical vs stored bytes, unique chunks,
+  stored ratio, artifact size — computed from manifests on demand.
+- nodeapi verbs: `ReleaseLocal`, `RestoreSandbox(tier)`,
+  `ExtractArtifacts`, `Prewarm` (interface + HTTP transport).
+- CI: `e2e-m3` full-stack exit gate (REST + running engine + ZFS +
+  warm/cold MinIO buckets + PostgreSQL): TTL-driven tier flow, **cold
+  restore < 10s interactive** with continuity, archive cost gate
+  (stored ≤ 60% of logical), recycle-to-artifacts, selective restore.
+  Decisions in [ADR-0004](docs/adr/0004-m3-archive-lifecycle.md).
+
+### Changed
+
+- `POST /v0/sandboxes` accepts `artifact_paths` (guest paths preserved at
+  recycle; default keeps nothing).
+- Resume claims RESUMING via compare-and-swap first — clients may now see
+  409 when racing a lifecycle transition (pre-1.0 API change).
+- `nodeapi.Agent.RestoreSandbox` takes a tier argument (pre-1.0 break).
+
+### Notes / deferred
+
+- Disk synthetic full and node-local chunk-cache LRU eviction → M4;
+  ARIMA wake prediction and rolling WS refresh → later; Xet-style
+  CDC/Merkle repo unchanged → next storage evolution (ADR-0004).
+- Latency gates CI-relative (nested virt, ADR-0001); bare-metal
+  re-measurement remains a tracked debt.
+
 ## [v0.2.0-m2] — 2026-07-08 — Second-level restore pipeline (M2)
 
 Snapshots become chunked, compressed, content-addressed, layered objects
