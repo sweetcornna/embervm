@@ -425,23 +425,27 @@ func TestClusterKillNode(t *testing.T) {
 		t.Fatalf("sandbox %s never reached %s (last: %s)", id, want, last)
 	}
 
-	// One paused sandbox per node: pause writes the snapshot through to L1.
-	// Placement spreads them by free memory, and any node that did not build
-	// the template must receive it from L1 on demand.
+	// One paused sandbox per node. Create all three FIRST — bin-packing
+	// budgets only ACTIVE sandboxes, so each RUNNING create pushes the next
+	// onto a different node (and any node that did not build the template
+	// receives it from L1 on demand). Only then write markers and pause
+	// (pause writes the snapshot through to L1).
 	pausedOn := map[string]sbInfo{}
 	for i := 0; i < 3; i++ {
 		sb := create()
 		if sb.NodeID == "" {
 			t.Fatalf("sandbox %s has no node_id", sb.ID)
 		}
+		pausedOn[sb.NodeID] = sb
+	}
+	if len(pausedOn) != 3 {
+		t.Fatalf("placement put %d/3 sandboxes on distinct nodes (bin-packing broken?)", len(pausedOn))
+	}
+	for _, sb := range pausedOn {
 		putFile(sb.ID, "/marker", "survives-"+sb.ID)
 		if code := a.do("POST", "/v0/sandboxes/"+sb.ID+"/pause", nil, nil); code/100 != 2 {
 			t.Fatalf("pause %s: HTTP %d", sb.ID, code)
 		}
-		pausedOn[sb.NodeID] = sb
-	}
-	if len(pausedOn) != 3 {
-		t.Fatalf("placement put %d/3 paused sandboxes on distinct nodes (bin-packing broken?)", len(pausedOn))
 	}
 	t.Logf("placement observed: one paused sandbox per node (bin-pack + L1 template receive)")
 
