@@ -56,13 +56,13 @@ func (a *Agent) reapZombies(ctx context.Context) {
 		if sb.machine.State() != lifecycle.StateRunning {
 			continue
 		}
-		if sb.fc != nil && sb.fc.Process != nil && !processAlive(sb.fc.Process.Pid) {
+		if sb.fc != nil && sb.fc.Process != nil && !childAlive(sb.fc.Process.Pid) {
 			victims = append(victims, victim{sb, "firecracker process died"})
 			continue
 		}
 		// A dead memory handler means every future page fault hangs the
 		// vCPU forever (docs/zh/04 §6) — the VM is unrecoverable in place.
-		if sb.uffd != nil && sb.uffd.Process != nil && !processAlive(sb.uffd.Process.Pid) {
+		if sb.uffd != nil && sb.uffd.Process != nil && !childAlive(sb.uffd.Process.Pid) {
 			victims = append(victims, victim{sb, "uffd handler died"})
 		}
 	}
@@ -101,7 +101,27 @@ func (a *Agent) reap(ctx context.Context, sb *sandbox, cause string) {
 	_ = a.cfg.Storage.DestroySandbox(ctx, sb.id)
 }
 
-// processAlive reports whether pid still exists (signal 0 probe).
-func processAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+// childAlive reports whether our child pid is still running. A signal-0
+// probe is NOT enough: an externally-killed child nobody Wait()ed is a
+// zombie, and zombies still answer kill(pid, 0). Probe with a non-blocking
+// wait instead — collecting the corpse IS the death notification. killFC/
+// killUffd ignore their subsequent Wait errors (ECHILD), so consuming the
+// status here is safe.
+func childAlive(pid int) bool {
+	var ws syscall.WaitStatus
+	for {
+		rc, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		switch {
+		case err == syscall.EINTR:
+			continue
+		case err == syscall.ECHILD:
+			return false // already reaped elsewhere: dead
+		case err != nil:
+			return true // conservative: never reap on probe errors
+		case rc == 0:
+			return true // still running
+		default:
+			return false // rc == pid: we just collected the corpse
+		}
+	}
 }
