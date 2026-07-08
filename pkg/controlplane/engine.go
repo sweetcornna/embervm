@@ -447,6 +447,14 @@ func (e *Engine) demoteHotToWarm(ctx context.Context) error {
 		return err
 	}
 	for _, sb := range due {
+		// Fork parents stay HOT (ADR-0006 D5): releasing would zfs-destroy
+		// a dataset with dependent clones (refused at the ZFS layer anyway)
+		// and drop the staging chain children still branch from.
+		if kids, err := e.store.LiveForkChildren(ctx, sb.ID, 0); err != nil {
+			return err
+		} else if len(kids) > 0 {
+			continue
+		}
 		agent, err := e.agentFor(sb.NodeID)
 		if err != nil {
 			log.Printf("lifecycle engine: demote %s: %v", sb.ID, err)

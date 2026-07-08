@@ -22,6 +22,9 @@ import (
 type cpMockAgent struct {
 	buildErr  error
 	createErr error
+	snapSeq   int
+	lastFork  struct{ parent, layer, newID string }
+	lastRB    struct{ id, layer string }
 }
 
 func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
@@ -35,10 +38,12 @@ func (m *cpMockAgent) RestoreSandbox(_ context.Context, id, _ string) (nodeapi.S
 func (m *cpMockAgent) ExtractArtifacts(context.Context, string, []string) error { return nil }
 func (m *cpMockAgent) Prewarm(context.Context, string, string) error            { return nil }
 func (m *cpMockAgent) SetBalloon(context.Context, string, int) error            { return nil }
-func (m *cpMockAgent) Fork(_ context.Context, _, _, newID string) (nodeapi.SandboxStatus, error) {
+func (m *cpMockAgent) Fork(_ context.Context, parentID, layer, newID string) (nodeapi.SandboxStatus, error) {
+	m.lastFork = struct{ parent, layer, newID string }{parentID, layer, newID}
 	return nodeapi.SandboxStatus{SandboxID: newID, State: "RUNNING", Netns: "ember1"}, nil
 }
-func (m *cpMockAgent) Rollback(_ context.Context, id, _ string) (nodeapi.SandboxStatus, error) {
+func (m *cpMockAgent) Rollback(_ context.Context, id, layer string) (nodeapi.SandboxStatus, error) {
+	m.lastRB = struct{ id, layer string }{id, layer}
 	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING", Netns: "ember0"}, nil
 }
 func (m *cpMockAgent) CreateSandbox(_ context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
@@ -55,7 +60,9 @@ func (m *cpMockAgent) ResumeSandbox(_ context.Context, id string) (nodeapi.Sandb
 	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING", Netns: "ember0"}, nil
 }
 func (m *cpMockAgent) SnapshotSandbox(_ context.Context, id, tag string) (string, error) {
-	return "snap-" + tag, nil
+	// The producer-defined return format the checkpoint handler parses.
+	m.snapSeq++
+	return fmt.Sprintf("%s@%s-%d", id, tag, m.snapSeq), nil
 }
 func (m *cpMockAgent) Status(_ context.Context, id string) (nodeapi.SandboxStatus, error) {
 	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING"}, nil
@@ -303,5 +310,201 @@ func TestServerGuestProxyUnsupportedAgent(t *testing.T) {
 
 	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/x", nil); w.Code != http.StatusNotImplemented {
 		t.Errorf("proxy without dialer = %d, want 501: %s", w.Code, w.Body)
+	}
+}
+
+// TestServerForkFlow drives the M5 branch API end to end against PG:
+// checkpoint → list → fork-by-tag → lineage on the child → destroy guards.
+func TestServerForkFlow(t *testing.T) {
+	agent := &cpMockAgent{}
+	h := newTestServer(t, agent)
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var parent Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &parent)
+
+	// Checkpoint with a user tag.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+parent.ID+"/checkpoints", map[string]string{"tag": "step-1"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("checkpoint = %d: %s", w.Code, w.Body)
+	}
+	var cp Checkpoint
+	_ = json.Unmarshal(w.Body.Bytes(), &cp)
+	if cp.Tag != "step-1" || cp.Layer != "p1" || cp.Seq != 1 {
+		t.Fatalf("checkpoint = %+v", cp)
+	}
+	// Duplicate tag → 409; bad tag → 400.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+parent.ID+"/checkpoints", map[string]string{"tag": "step-1"}); w.Code != http.StatusConflict {
+		t.Errorf("duplicate tag = %d, want 409", w.Code)
+	}
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+parent.ID+"/checkpoints", map[string]string{"tag": "../evil"}); w.Code != http.StatusBadRequest {
+		t.Errorf("bad tag = %d, want 400", w.Code)
+	}
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+parent.ID+"/checkpoints", nil)
+	var cps []Checkpoint
+	_ = json.Unmarshal(w.Body.Bytes(), &cps)
+	if len(cps) != 1 {
+		t.Fatalf("checkpoints = %+v", cps)
+	}
+
+	// Fork from the tag: child carries lineage, node, geometry; the agent
+	// saw the parent's layer.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+parent.ID+"/fork", map[string]string{"checkpoint": "step-1"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("fork = %d: %s", w.Code, w.Body)
+	}
+	var child Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &child)
+	if child.ParentID != parent.ID || child.ForkedFrom != "step-1" || child.State != "RUNNING" {
+		t.Fatalf("child = %+v", child)
+	}
+	if child.NodeID != parent.NodeID || child.MemoryMiB != parent.MemoryMiB {
+		t.Fatalf("child placement/geometry = %+v (parent %+v)", child, parent)
+	}
+	if agent.lastFork.parent != parent.ID || agent.lastFork.layer != "p1" || agent.lastFork.newID != child.ID {
+		t.Fatalf("agent saw fork %+v", agent.lastFork)
+	}
+
+	// D5 destroy guard: parent with a live fork refuses DELETE.
+	if w := call(h, http.MethodDelete, "/v0/sandboxes/"+parent.ID, nil); w.Code != http.StatusConflict {
+		t.Fatalf("delete forked parent = %d, want 409: %s", w.Code, w.Body)
+	}
+	if w := call(h, http.MethodDelete, "/v0/sandboxes/"+child.ID, nil); w.Code != http.StatusNoContent {
+		t.Fatalf("delete child = %d", w.Code)
+	}
+	if w := call(h, http.MethodDelete, "/v0/sandboxes/"+parent.ID, nil); w.Code != http.StatusNoContent {
+		t.Fatalf("delete parent after child gone = %d: %s", w.Code, w.Body)
+	}
+}
+
+// TestServerForkAutoCheckpointAndQuota pins the branch-now UX (fork with no
+// checkpoint makes one) and that forks are quota-counted.
+func TestServerForkAutoCheckpointAndQuota(t *testing.T) {
+	agent := &cpMockAgent{}
+	h := newTestServer(t, agent)
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var parent Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &parent)
+
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+parent.ID+"/fork", nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("auto-checkpoint fork = %d: %s", w.Code, w.Body)
+	}
+	var child Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &child)
+	if child.ForkedFrom != "cp1" {
+		t.Fatalf("auto checkpoint tag = %q, want cp1", child.ForkedFrom)
+	}
+
+	// max_sandboxes is 2: parent + child fill the quota; a second fork 429s.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+parent.ID+"/fork", nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-quota fork = %d, want 429: %s", w.Code, w.Body)
+	}
+
+	// Cross-tenant: bob cannot see alice's sandbox to fork it.
+	if w := callAs(h, "tok2", http.MethodPost, "/v0/sandboxes/"+parent.ID+"/fork", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant fork = %d, want 404", w.Code)
+	}
+}
+
+// TestServerRollback pins the rollback flow: claim, layer switch, checkpoint
+// pruning, and the live-fork 409 guard.
+func TestServerRollback(t *testing.T) {
+	agent := &cpMockAgent{}
+	h := newTestServer(t, agent)
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	for _, tag := range []string{"a", "b"} {
+		if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/checkpoints", map[string]string{"tag": tag}); w.Code != http.StatusCreated {
+			t.Fatalf("checkpoint %s = %d", tag, w.Code)
+		}
+	}
+
+	// A fork off the NEWER checkpoint blocks rollback to the older one.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/fork", map[string]string{"checkpoint": "b"})
+	var child Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &child)
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/rollback", map[string]string{"checkpoint": "a"}); w.Code != http.StatusConflict {
+		t.Fatalf("rollback with live fork off newer checkpoint = %d, want 409: %s", w.Code, w.Body)
+	}
+	if w := call(h, http.MethodDelete, "/v0/sandboxes/"+child.ID, nil); w.Code != http.StatusNoContent {
+		t.Fatalf("delete child = %d", w.Code)
+	}
+
+	// Now the rollback goes through, prunes b, and the agent saw the layer.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/rollback", map[string]string{"checkpoint": "a"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("rollback = %d: %s", w.Code, w.Body)
+	}
+	if agent.lastRB.id != sb.ID || agent.lastRB.layer != "p1" {
+		t.Fatalf("agent saw rollback %+v", agent.lastRB)
+	}
+	var after Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &after)
+	if after.State != "RUNNING" {
+		t.Fatalf("state after rollback = %s", after.State)
+	}
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/checkpoints", nil)
+	var cps []Checkpoint
+	_ = json.Unmarshal(w.Body.Bytes(), &cps)
+	if len(cps) != 1 || cps[0].Tag != "a" {
+		t.Fatalf("checkpoints after rollback = %+v, want only a", cps)
+	}
+	// Rollback to an unknown checkpoint → 404.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/rollback", map[string]string{"checkpoint": "ghost"}); w.Code != http.StatusNotFound {
+		t.Fatalf("rollback to ghost = %d, want 404", w.Code)
+	}
+}
+
+// TestServerExecCheckpoint pins the time-travel primitive: exec with
+// checkpoint:true snapshots first and returns the step's tag.
+func TestServerExecCheckpoint(t *testing.T) {
+	agent := &cpMockAgent{}
+	h := newTestServer(t, agent)
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/exec", map[string]any{
+		"cmd": "echo", "checkpoint": true,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("exec+checkpoint = %d: %s", w.Code, w.Body)
+	}
+	var resp struct {
+		Stdout     []byte `json:"stdout"`
+		Checkpoint string `json:"checkpoint"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Checkpoint != "cp1" || string(resp.Stdout) != "out:echo" {
+		t.Fatalf("exec+checkpoint resp = %+v (%s)", resp, w.Body)
+	}
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/checkpoints", nil)
+	var cps []Checkpoint
+	_ = json.Unmarshal(w.Body.Bytes(), &cps)
+	if len(cps) != 1 || cps[0].Tag != "cp1" {
+		t.Fatalf("checkpoints = %+v", cps)
+	}
+	// Plain exec is unchanged: no checkpoint field appears.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/exec", map[string]any{"cmd": "echo"})
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"checkpoint"`) {
+		t.Fatalf("plain exec = %d: %s", w.Code, w.Body)
 	}
 }

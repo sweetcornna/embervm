@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/embervm/embervm/pkg/metrics"
@@ -59,6 +60,10 @@ type Sandbox struct {
 	PrewarmedAt   *time.Time `json:"prewarmed_at,omitempty"`
 	// NodeID is where the sandbox currently lives (M4 placement).
 	NodeID string `json:"node_id,omitempty"`
+	// ParentID/ForkedFrom record fork lineage (M5): the sandbox this one
+	// was forked from and the checkpoint tag it branched at.
+	ParentID   string `json:"parent_id,omitempty"`
+	ForkedFrom string `json:"forked_from,omitempty"`
 }
 
 // Store is the PostgreSQL-backed persistence layer.
@@ -184,6 +189,114 @@ func (s *Store) DeleteTemplate(ctx context.Context, id string) error {
 	return nil
 }
 
+// --- checkpoints (M5 fork/rollback) ------------------------------------------
+
+// Checkpoint is a named pause layer — the anchor forks branch from and
+// rollbacks return to (ADR-0006 D1).
+type Checkpoint struct {
+	Tag       string    `json:"tag"`
+	Layer     string    `json:"layer"` // memory layer name "p<N>"
+	Seq       int       `json:"seq"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// InsertCheckpoint records a checkpoint; a duplicate tag is ErrConflict.
+func (s *Store) InsertCheckpoint(ctx context.Context, sandboxID, tag, layer string, seq int) (Checkpoint, error) {
+	var cp Checkpoint
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO checkpoints (sandbox_id, tag, layer, seq) VALUES ($1,$2,$3,$4)
+		 RETURNING tag, layer, seq, created_at`,
+		sandboxID, tag, layer, seq).Scan(&cp.Tag, &cp.Layer, &cp.Seq, &cp.CreatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+		return Checkpoint{}, ErrConflict
+	}
+	return cp, err
+}
+
+// GetCheckpoint fetches one checkpoint by tag.
+func (s *Store) GetCheckpoint(ctx context.Context, sandboxID, tag string) (Checkpoint, error) {
+	var cp Checkpoint
+	err := s.pool.QueryRow(ctx,
+		`SELECT tag, layer, seq, created_at FROM checkpoints WHERE sandbox_id=$1 AND tag=$2`,
+		sandboxID, tag).Scan(&cp.Tag, &cp.Layer, &cp.Seq, &cp.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Checkpoint{}, ErrNotFound
+	}
+	return cp, err
+}
+
+// ListCheckpoints returns a sandbox's checkpoints, oldest first (the
+// time-travel timeline).
+func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkpoint, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT tag, layer, seq, created_at FROM checkpoints WHERE sandbox_id=$1 ORDER BY seq`,
+		sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Checkpoint{}
+	for rows.Next() {
+		var cp Checkpoint
+		if err := rows.Scan(&cp.Tag, &cp.Layer, &cp.Seq, &cp.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, cp)
+	}
+	return out, rows.Err()
+}
+
+// DeleteCheckpointsAfter removes the checkpoints a rollback to seq discards
+// (their zfs snapshots died with `rollback -r`), returning the tags.
+func (s *Store) DeleteCheckpointsAfter(ctx context.Context, sandboxID string, seq int) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`DELETE FROM checkpoints WHERE sandbox_id=$1 AND seq>$2 RETURNING tag`,
+		sandboxID, seq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tags []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, rows.Err()
+}
+
+// LiveForkChildren lists a parent's non-terminal fork children — the ZFS
+// clone dependency made queryable (destroy/tiering guards, ADR-0006 D5).
+// minSeq > 0 restricts to children branched from checkpoints newer than it
+// (the rollback guard: those snapshots are what `zfs rollback -r` destroys).
+func (s *Store) LiveForkChildren(ctx context.Context, parentID string, minSeq int) ([]string, error) {
+	q := `SELECT s.id FROM sandboxes s WHERE s.parent_id=$1 AND s.state <> 'STOPPED'`
+	args := []any{parentID}
+	if minSeq > 0 {
+		q = `SELECT s.id FROM sandboxes s
+		       JOIN checkpoints c ON c.sandbox_id=$1 AND c.tag=s.forked_from
+		      WHERE s.parent_id=$1 AND s.state <> 'STOPPED' AND c.seq>$2`
+		args = append(args, minSeq)
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // --- sandboxes --------------------------------------------------------------
 
 // CreateSandbox inserts a sandbox in the given initial state.
@@ -192,13 +305,14 @@ func (s *Store) CreateSandbox(ctx context.Context, sb Sandbox) (Sandbox, error) 
 		sb.ArtifactPaths = []string{}
 	}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandboxes (id,template_id,state,vcpus,memory_mib,data_disk_gib,owner,artifact_paths)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		`INSERT INTO sandboxes (id,template_id,state,vcpus,memory_mib,data_disk_gib,owner,artifact_paths,parent_id,forked_from)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::uuid,NULLIF($10,''))
 		 RETURNING `+sandboxCols,
-		sb.ID, sb.TemplateID, sb.State, sb.VCPUs, sb.MemoryMiB, sb.DataDiskGiB, sb.Owner, sb.ArtifactPaths).
+		sb.ID, sb.TemplateID, sb.State, sb.VCPUs, sb.MemoryMiB, sb.DataDiskGiB, sb.Owner, sb.ArtifactPaths,
+		sb.ParentID, sb.ForkedFrom).
 		Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID)
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom)
 	return sb, err
 }
 
@@ -206,14 +320,14 @@ func scanSandbox(row pgx.Row) (Sandbox, error) {
 	var sb Sandbox
 	err := row.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 		&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-		&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID)
+		&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
 	return sb, err
 }
 
-const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at,node_id`
+const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at,node_id,COALESCE(parent_id::text,''),COALESCE(forked_from,'')`
 
 // GetSandbox fetches a sandbox by id.
 func (s *Store) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
@@ -256,7 +370,7 @@ func (s *Store) ListSandboxes(ctx context.Context, owner, state string) ([]Sandb
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID); err != nil {
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)
@@ -353,7 +467,7 @@ func (s *Store) ListTransitionDue(ctx context.Context, state string, before time
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID); err != nil {
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)

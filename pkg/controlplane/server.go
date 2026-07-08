@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -108,6 +110,12 @@ func (s *Server) Handler() http.Handler {
 	v0.POST("/sandboxes/:id/snapshot", s.snapshotSandbox)
 	v0.DELETE("/sandboxes/:id", s.killSandbox)
 
+	// M5 fork/branch/rollback (ADR-0006).
+	v0.POST("/sandboxes/:id/checkpoints", s.createCheckpoint)
+	v0.GET("/sandboxes/:id/checkpoints", s.listCheckpoints)
+	v0.POST("/sandboxes/:id/fork", s.forkSandbox)
+	v0.POST("/sandboxes/:id/rollback", s.rollbackSandbox)
+
 	v0.GET("/sandboxes/:id/storage", s.sandboxStorage)
 	v0.GET("/storage-report", s.storageReportAll)
 	v0.POST("/sandboxes/:id/restore-artifacts", s.restoreArtifacts)
@@ -145,6 +153,9 @@ func (s *Server) ownedSandbox(c *gin.Context, id string) (Sandbox, bool) {
 func storeStatus(err error) int {
 	if errors.Is(err, ErrNotFound) {
 		return http.StatusNotFound
+	}
+	if errors.Is(err, ErrConflict) {
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }
@@ -409,6 +420,220 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 	c.JSON(http.StatusOK, sb)
 }
 
+// --- M5 fork/branch/rollback (ADR-0006) --------------------------------------
+
+// tagRE constrains checkpoint tags to safe dataset/path components.
+var tagRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// checkpointNow drives the snapshot verb (pause → diff layer + zfs snapshot
+// → resume) and records the layer it produced. An empty tag names itself
+// cp<seq> after the fact.
+func (s *Server) checkpointNow(c *gin.Context, sb Sandbox, tag string) (Checkpoint, error) {
+	agent, err := s.agentByID(sb.NodeID)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	agentTag := tag
+	if agentTag == "" {
+		agentTag = "cp"
+	}
+	snapID, err := agent.SnapshotSandbox(c, sb.ID, agentTag)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	// Producer-defined return format: "<id>@<tag>-<seq>".
+	seqStr := snapID[strings.LastIndex(snapID, "-")+1:]
+	seq, err := strconv.Atoi(seqStr)
+	if err != nil {
+		return Checkpoint{}, fmt.Errorf("unparseable snapshot id %q", snapID)
+	}
+	if tag == "" {
+		tag = "cp" + seqStr
+	}
+	return s.store.InsertCheckpoint(c, sb.ID, tag, "p"+seqStr, seq)
+}
+
+func (s *Server) createCheckpoint(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var body struct {
+		Tag string `json:"tag"`
+	}
+	_ = c.ShouldBindJSON(&body) // empty body = auto tag
+	if body.Tag != "" && !tagRE.MatchString(body.Tag) {
+		abortErr(c, http.StatusBadRequest, errors.New("bad checkpoint tag"))
+		return
+	}
+	cp, err := s.checkpointNow(c, sb, body.Tag)
+	if err != nil {
+		abortErr(c, storeStatus(err), err)
+		return
+	}
+	c.JSON(http.StatusCreated, cp)
+}
+
+func (s *Server) listCheckpoints(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	cps, err := s.store.ListCheckpoints(c, sb.ID)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, cps)
+}
+
+// forkSandbox branches a new sandbox off a parent checkpoint (omitted
+// checkpoint = checkpoint the live parent now). The child is a full
+// quota-counted sandbox on the parent's node (the chain is node-local).
+func (s *Server) forkSandbox(c *gin.Context) {
+	parent, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var body struct {
+		Checkpoint string `json:"checkpoint"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	owner := tokenInfo(c)
+	active, err := s.store.CountActiveSandboxes(c, owner.Owner)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	if owner.MaxSandboxes > 0 && active >= owner.MaxSandboxes {
+		abortErr(c, http.StatusTooManyRequests,
+			errors.New("sandbox quota exceeded ("+strconv.Itoa(owner.MaxSandboxes)+")"))
+		return
+	}
+	switch lifecycle.State(parent.State) {
+	case lifecycle.StateRunning, lifecycle.StatePausedHot:
+	default:
+		abortErr(c, http.StatusConflict,
+			fmt.Errorf("fork requires a HOT parent (state %s): resume it first", parent.State))
+		return
+	}
+
+	var cp Checkpoint
+	if body.Checkpoint == "" {
+		cp, err = s.checkpointNow(c, parent, "")
+	} else {
+		cp, err = s.store.GetCheckpoint(c, parent.ID, body.Checkpoint)
+	}
+	if err != nil {
+		abortErr(c, storeStatus(err), err)
+		return
+	}
+
+	id := uuid.NewString()
+	child, err := s.store.CreateSandbox(c, Sandbox{
+		ID: id, TemplateID: parent.TemplateID, State: string(lifecycle.StatePending),
+		VCPUs: parent.VCPUs, MemoryMiB: parent.MemoryMiB, DataDiskGiB: parent.DataDiskGiB,
+		Owner: owner.Owner, ArtifactPaths: parent.ArtifactPaths,
+		ParentID: parent.ID, ForkedFrom: cp.Tag,
+	})
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	agent, err := s.agentByID(parent.NodeID)
+	if err != nil {
+		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err := s.store.SetSandboxNode(c, id, parent.NodeID); err != nil && parent.NodeID != "" {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	st, err := agent.Fork(c, parent.ID, cp.Layer, id)
+	if err != nil {
+		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.store.SetSandboxState(c, id, string(lifecycle.StatePending), st.State, st.Netns, ""); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	child.State, child.Netns, child.NodeID = st.State, st.Netns, parent.NodeID
+	c.JSON(http.StatusCreated, child)
+}
+
+// rollbackSandbox switches the sandbox back to a checkpoint, discarding
+// everything after it — refused while newer checkpoints have live forks
+// (their clone base is what `zfs rollback -r` would destroy).
+func (s *Server) rollbackSandbox(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var body struct {
+		Checkpoint string `json:"checkpoint"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Checkpoint == "" {
+		abortErr(c, http.StatusBadRequest, errors.New("checkpoint is required"))
+		return
+	}
+	cp, err := s.store.GetCheckpoint(c, sb.ID, body.Checkpoint)
+	if err != nil {
+		abortErr(c, storeStatus(err), err)
+		return
+	}
+	kids, err := s.store.LiveForkChildren(c, sb.ID, cp.Seq)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	if len(kids) > 0 {
+		abortErr(c, http.StatusConflict,
+			fmt.Errorf("rollback would destroy checkpoints with live forks: %s", strings.Join(kids, ", ")))
+		return
+	}
+
+	// Claim the sandbox (CAS): a racing engine demotion or user verb loses
+	// cleanly on the from-state. The legal claim edge depends on where the
+	// sandbox is.
+	claim := lifecycle.StatePausing
+	if lifecycle.State(sb.State) == lifecycle.StatePausedHot {
+		claim = lifecycle.StateResuming
+	}
+	if err := lifecycle.Validate(lifecycle.State(sb.State), claim); err != nil {
+		abortErr(c, http.StatusConflict, err)
+		return
+	}
+	if err := s.store.TransitionSandbox(c, sb.ID, sb.State, string(claim), ""); err != nil {
+		abortErr(c, storeStatus(err), err)
+		return
+	}
+	agent, err := s.agentByID(sb.NodeID)
+	var st nodeapi.SandboxStatus
+	if err == nil {
+		st, err = agent.Rollback(c, sb.ID, cp.Layer)
+	}
+	if err != nil {
+		_ = s.store.SetSandboxState(c, sb.ID, string(claim), string(lifecycle.StateFailed), "", err.Error())
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.store.SetSandboxState(c, sb.ID, string(claim), st.State, st.Netns, ""); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	if tags, err := s.store.DeleteCheckpointsAfter(c, sb.ID, cp.Seq); err != nil {
+		log.Printf("controlplane: prune checkpoints after %s rollback: %v", sb.ID, err)
+	} else if len(tags) > 0 {
+		log.Printf("controlplane: rollback %s to %s discarded checkpoints %s", sb.ID, cp.Tag, strings.Join(tags, ", "))
+	}
+	sb.State, sb.Netns = st.State, st.Netns
+	c.JSON(http.StatusOK, sb)
+}
+
 // proxyGuest is the M4 gateway: authenticated, owner-scoped forwarding of
 // any HTTP(S)/WebSocket traffic to a guest port. In-proc agents proxy
 // straight into the netns; split-mode agents add a UDS hop.
@@ -648,6 +873,17 @@ func (s *Server) killSandbox(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Fork lineage guard (ADR-0006 D5): children are ZFS clones of this
+	// dataset's snapshots — destroying under them fails at the ZFS layer,
+	// so refuse loudly first.
+	if kids, err := s.store.LiveForkChildren(c, id, 0); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	} else if len(kids) > 0 {
+		abortErr(c, http.StatusConflict,
+			fmt.Errorf("sandbox has live forks (%s) — destroy them first", strings.Join(kids, ", ")))
+		return
+	}
 	agent, ok := s.agentOf(c, sb)
 	if !ok {
 		return
@@ -666,25 +902,44 @@ func (s *Server) killSandbox(c *gin.Context) {
 // --- guest proxy ------------------------------------------------------------
 
 func (s *Server) execSandbox(c *gin.Context) {
-	if _, ok := s.ownedSandbox(c, c.Param("id")); !ok {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
 		return
 	}
-	var req guestapi.ExecRequest
+	var req struct {
+		guestapi.ExecRequest
+		// Checkpoint=true snapshots BEFORE running the command (M5
+		// time-travel): the step's checkpoint is the state the command saw,
+		// so forking it replays the step. The tag comes back in the response.
+		Checkpoint bool `json:"checkpoint"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		abortErr(c, http.StatusBadRequest, err)
 		return
 	}
-	sbEx, okEx := s.ownedSandbox(c, c.Param("id"))
-	if !okEx {
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
 		return
 	}
-	agentEx, okEx := s.agentOf(c, sbEx)
-	if !okEx {
-		return
+	var cpTag string
+	if req.Checkpoint {
+		cp, err := s.checkpointNow(c, sb, "")
+		if err != nil {
+			abortErr(c, storeStatus(err), err)
+			return
+		}
+		cpTag = cp.Tag
 	}
-	resp, err := agentEx.Exec(c, c.Param("id"), &req)
+	resp, err := agent.Exec(c, c.Param("id"), &req.ExecRequest)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	if cpTag != "" {
+		c.JSON(http.StatusOK, struct {
+			*guestapi.ExecResponse
+			Checkpoint string `json:"checkpoint"`
+		}{resp, cpTag})
 		return
 	}
 	c.JSON(http.StatusOK, resp)

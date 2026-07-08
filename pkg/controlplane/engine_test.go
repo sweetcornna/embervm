@@ -453,3 +453,48 @@ func pausedSandboxWithArtifacts(t *testing.T, s *Store, state string, age time.D
 	}
 	return id
 }
+
+// TestEngineSkipsForkParents pins ADR-0006 D5: a fork parent's dataset is
+// the children's clone base, so TTL demotion must leave it HOT until every
+// child is gone.
+func TestEngineSkipsForkParents(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	agent := newMockTierAgent()
+	e := NewEngine(s, SingleAgent(agent), nil, nil, EngineConfig{TTLWarm: time.Minute})
+
+	parent := pausedSandbox(t, s, "PAUSED_HOT", 2*time.Minute)
+	psb, err := s.GetSandbox(ctx, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := uuid.NewString()
+	if _, err := s.CreateSandbox(ctx, Sandbox{
+		ID: child, TemplateID: psb.TemplateID, State: "RUNNING",
+		VCPUs: 1, MemoryMiB: 256, DataDiskGiB: 1,
+		ParentID: parent, ForkedFrom: "cp1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.tickOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sb, _ := s.GetSandbox(ctx, parent); sb.State != "PAUSED_HOT" {
+		t.Fatalf("fork parent demoted to %s with a live child", sb.State)
+	}
+	if len(agent.released) != 0 {
+		t.Fatalf("released = %v, want none", agent.released)
+	}
+
+	// Child gone → the parent tiers normally again.
+	if err := s.SetSandboxState(ctx, child, "RUNNING", "STOPPED", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.tickOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sb, _ := s.GetSandbox(ctx, parent); sb.State != "PAUSED_WARM" {
+		t.Fatalf("parent state after child stopped = %s, want PAUSED_WARM", sb.State)
+	}
+}
