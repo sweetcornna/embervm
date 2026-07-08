@@ -224,9 +224,26 @@ func startClusterNode(t *testing.T, pool string, i int) *clusterNode {
 			_ = n.cmd.Process.Kill()
 			_, _ = n.cmd.Process.Wait()
 		}
-		if data, err := os.ReadFile(logf.Name()); err == nil && t.Failed() {
+		if !t.Failed() {
+			return
+		}
+		if data, err := os.ReadFile(logf.Name()); err == nil {
 			t.Logf("--- %s daemon log ---\n%s", id, data)
 		}
+		// Per-sandbox process logs (fc.log, uffd.log, jailer stderr) are the
+		// only witnesses to why a microVM died inside the daemon.
+		_ = filepath.WalkDir(filepath.Join(dir, "work"), func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".log") {
+				return nil
+			}
+			if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
+				if len(data) > 4096 {
+					data = data[len(data)-4096:]
+				}
+				t.Logf("--- %s %s ---\n%s", id, p, data)
+			}
+			return nil
+		})
 	})
 
 	client := nodeapi.NewClient(sock)
