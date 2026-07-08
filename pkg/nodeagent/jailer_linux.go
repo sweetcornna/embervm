@@ -66,11 +66,45 @@ func (a *Agent) fcAPISock(sb *sandbox) string {
 	return filepath.Join(sb.dir, "fc.sock")
 }
 
+// jailerExecPath is the stable-named Firecracker binary handed to the
+// jailer. The jailer builds its chroot at <chroot-base>/<exec-file
+// basename>/<id>/root, so the versioned asset name (firecracker-v1.16.1-
+// x86_64) would put the jail somewhere jailRoot() — and every path derived
+// from it — does not point. Staging a hard link named exactly "firecracker"
+// pins the layout regardless of the FC release in use.
+func (a *Agent) jailerExecPath() string {
+	return filepath.Join(a.cfg.JailerChrootBase, "bin", "firecracker")
+}
+
+// stageJailerExec places cfg.FCBin at jailerExecPath(): hard link on the
+// same filesystem, copy across filesystems, atomically renamed so
+// concurrent jail builds never see a partial binary.
+func (a *Agent) stageJailerExec(sb *sandbox) error {
+	dst := a.jailerExecPath()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := dst + "." + sb.id
+	_ = os.Remove(tmp)
+	if err := os.Link(a.cfg.FCBin, tmp); err != nil {
+		if err := copyFileSimple(tmp, a.cfg.FCBin); err != nil {
+			return err
+		}
+		if err := os.Chmod(tmp, 0o755); err != nil {
+			return err
+		}
+	}
+	return os.Rename(tmp, dst)
+}
+
 // buildJail assembles the chroot: directories, bind mounts, the guest
 // kernel, and ownership. Idempotent (re-binding over an existing mount is
 // prevented by tearing down first).
 func (a *Agent) buildJail(sb *sandbox) error {
 	a.teardownJail(sb) // clean slate; stale mounts poison snapshots
+	if err := a.stageJailerExec(sb); err != nil {
+		return fmt.Errorf("stage jailer exec file: %w", err)
+	}
 	root := a.jailRoot(sb.id)
 	uid := a.jailUIDFor(sb)
 	for _, d := range []string{
@@ -129,7 +163,7 @@ func (a *Agent) jailerCommand(sb *sandbox) *exec.Cmd {
 	uid := strconv.Itoa(a.jailUIDFor(sb))
 	return exec.Command(a.cfg.JailerBin,
 		"--id", sb.id,
-		"--exec-file", a.cfg.FCBin,
+		"--exec-file", a.jailerExecPath(),
 		"--uid", uid,
 		"--gid", uid,
 		"--chroot-base-dir", a.cfg.JailerChrootBase,

@@ -343,7 +343,7 @@ func (s *Store) ListTransitionDue(ctx context.Context, state string, before time
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt); err != nil {
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)

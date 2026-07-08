@@ -111,18 +111,22 @@ jobs:
       - name: Run node agent smoke test
         run: sudo -E env "PATH=$PATH" FC_VERSION=${{ matrix.fc_version }} bash test/integration/nodeagent-smoke.sh
 
-      - name: Make VM logs readable for artifact upload
+      - name: Collect VM logs for artifact upload
+        # The upload-artifact glob walks all of /tmp and dies with EACCES on
+        # root-owned dirs (snap-private-tmp), so gather the logs ourselves.
         if: failure()
-        run: sudo chmod -R a+rX work 2>/dev/null || true
+        run: |
+          mkdir -p vm-logs
+          sudo find /tmp -type f \( -name 'fc*.log' -o -name 'uffd*.log' \) \
+            -exec cp --parents {} vm-logs/ \; 2>/dev/null || true
+          sudo chmod -R a+rX vm-logs work 2>/dev/null || true
 
       - name: Upload VM logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: nodeagent-logs-${{ matrix.fc_version }}
-          path: |
-            /tmp/**/fc*.log
-            /tmp/**/uffd*.log
+          path: vm-logs/
           if-no-files-found: ignore
 
   dev-smoke:

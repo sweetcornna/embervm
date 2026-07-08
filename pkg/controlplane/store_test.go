@@ -27,7 +27,7 @@ func testStore(t *testing.T) *Store {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx, `TRUNCATE templates, sandboxes, sandbox_events CASCADE`); err != nil {
+	if _, err := s.pool.Exec(ctx, `TRUNCATE templates, sandboxes, sandbox_events, nodes CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	t.Cleanup(s.Close)
