@@ -23,17 +23,55 @@ import (
 // Server is the REST control plane: it persists state in Store and drives the
 // node through Agent.
 type Server struct {
-	store  *Store
-	agent  nodeapi.Agent
-	tokens *TokenStore
-	l1     chunkstore.ListingBackend // warm object store (nil: reports/tiers degrade)
-	cold   chunkstore.ListingBackend // cold object store
+	store    *Store
+	registry *Registry
+	sched    *Scheduler
+	tokens   *TokenStore
+	l1       chunkstore.ListingBackend // warm object store (nil: reports/tiers degrade)
+	cold     chunkstore.ListingBackend // cold object store
 }
 
-// NewServer wires a control-plane server. l1/cold may be nil: storage
-// reports and selective restore then answer 503 for tiers they cannot see.
+// LocalNodeID names the implicit node of a single-agent deployment.
+const LocalNodeID = "local"
+
+// NewServer wires a single-node control plane (the M1-M3 shape): one agent
+// registered as node "local". l1/cold may be nil: storage reports and
+// selective restore then answer 503 for tiers they cannot see.
 func NewServer(store *Store, agent nodeapi.Agent, tokens *TokenStore, l1, cold chunkstore.ListingBackend) *Server {
-	return &Server{store: store, agent: agent, tokens: tokens, l1: l1, cold: cold}
+	registry := NewRegistry(map[string]nodeapi.Agent{LocalNodeID: agent})
+	return NewClusterServer(store, registry, NewScheduler(store, registry, SchedulerConfig{}), tokens, l1, cold)
+}
+
+// NewClusterServer wires a multi-node control plane (M4): agents resolve
+// through the registry and placement goes through the scheduler. The caller
+// runs sched.RegisterNodes + sched.Run.
+func NewClusterServer(store *Store, registry *Registry, sched *Scheduler, tokens *TokenStore, l1, cold chunkstore.ListingBackend) *Server {
+	return &Server{store: store, registry: registry, sched: sched, tokens: tokens, l1: l1, cold: cold}
+}
+
+// AgentResolver adapts the registry for the lifecycle engine (its TierAgent
+// verbs are a subset of nodeapi.Agent).
+func (s *Server) AgentResolver() AgentResolver {
+	return func(nodeID string) (TierAgent, error) { return s.agentByID(nodeID) }
+}
+
+// agentByID resolves a node id, defaulting empty to the local node.
+func (s *Server) agentByID(nodeID string) (nodeapi.Agent, error) {
+	if nodeID == "" {
+		nodeID = LocalNodeID
+	}
+	return s.registry.Agent(nodeID)
+}
+
+// agentOf resolves the agent hosting a sandbox, 503ing the request when the
+// node is unknown.
+func (s *Server) agentOf(c *gin.Context, sb Sandbox) (nodeapi.Agent, bool) {
+	a, err := s.agentByID(sb.NodeID)
+	if err != nil {
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return nil, false
+	}
+	return a, true
 }
 
 // Handler builds the Gin router (mounted at /v0, plus an unauthenticated
@@ -117,8 +155,19 @@ func (s *Server) createTemplate(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	// M1 builds synchronously; the row starts BUILDING and settles here.
-	if err := s.agent.BuildTemplate(c, id, body.Image); err != nil {
+	// Builds synchronously on one node; the template ships to every other
+	// node as a zfs stream via L1 (GUID lineage) and is received on demand.
+	buildNode, err := s.sched.Place(c, "", 0)
+	if err != nil {
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	agent, err := s.agentByID(buildNode)
+	if err != nil {
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err := agent.BuildTemplate(c, id, body.Image); err != nil {
 		_ = s.store.SetTemplateState(c, id, "ERROR", err.Error())
 		abortErr(c, http.StatusInternalServerError, err)
 		return
@@ -206,7 +255,22 @@ func (s *Server) createSandbox(c *gin.Context) {
 		return
 	}
 
-	st, err := s.agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
+	nodeID, err := s.sched.Place(c, "", body.MemoryMiB)
+	if err != nil {
+		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	agent, err := s.agentByID(nodeID)
+	if err != nil {
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err := s.store.SetSandboxNode(c, id, nodeID); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	st, err := agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
 		SandboxID: id, TemplateID: body.TemplateID,
 		VCPUs: body.VCPUs, MemoryMiB: body.MemoryMiB, DataDiskGiB: body.DataDiskGiB,
 	})
@@ -248,7 +312,11 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := s.agent.PauseSandbox(c, id); err != nil {
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
+		return
+	}
+	if err := agent.PauseSandbox(c, id); err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -279,12 +347,35 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 	var st nodeapi.SandboxStatus
 	var err error
 	switch lifecycle.State(sb.State) {
-	case lifecycle.StatePausedWarm:
-		st, err = s.agent.RestoreSandbox(c, id, "warm")
-	case lifecycle.StateArchivedCold:
-		st, err = s.agent.RestoreSandbox(c, id, "cold")
+	case lifecycle.StatePausedWarm, lifecycle.StateArchivedCold, lifecycle.StateFailed:
+		// Tiered (or failed-node) restores can land anywhere: sticky to the
+		// previous node, else bin-packed. FAILED here means "node died with
+		// it" — its last write-through snapshot restores from L1.
+		tier := "warm"
+		if lifecycle.State(sb.State) == lifecycle.StateArchivedCold {
+			tier = "cold"
+		}
+		var nodeID string
+		nodeID, err = s.sched.Place(c, sb.NodeID, sb.MemoryMiB)
+		if err != nil {
+			_ = s.store.SetSandboxState(c, id, string(lifecycle.StateResuming), string(lifecycle.StateFailed), "", err.Error())
+			abortErr(c, http.StatusServiceUnavailable, err)
+			return
+		}
+		var agent nodeapi.Agent
+		agent, err = s.agentByID(nodeID)
+		if err == nil {
+			if err = s.store.SetSandboxNode(c, id, nodeID); err == nil {
+				st, err = agent.RestoreSandbox(c, id, tier)
+			}
+		}
 	default:
-		st, err = s.agent.ResumeSandbox(c, id)
+		// Hot resume runs where the local state lives.
+		var agent nodeapi.Agent
+		agent, err = s.agentByID(sb.NodeID)
+		if err == nil {
+			st, err = agent.ResumeSandbox(c, id)
+		}
 	}
 	if err != nil {
 		_ = s.store.SetSandboxState(c, id, string(lifecycle.StateResuming), string(lifecycle.StateFailed), "", err.Error())
@@ -380,7 +471,21 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	st, err := s.agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
+	nodeID, err := s.sched.Place(c, sb.NodeID, sb.MemoryMiB)
+	if err != nil {
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	agent, err := s.agentByID(nodeID)
+	if err != nil {
+		abortErr(c, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err := s.store.SetSandboxNode(c, newID, nodeID); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	st, err := agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
 		SandboxID: newID, TemplateID: sb.TemplateID,
 		VCPUs: sb.VCPUs, MemoryMiB: sb.MemoryMiB, DataDiskGiB: sb.DataDiskGiB,
 	})
@@ -393,11 +498,11 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.agent.WriteFile(c, newID, "/tmp/artifacts.tar", 0o600, tarBytes); err != nil {
+	if err := agent.WriteFile(c, newID, "/tmp/artifacts.tar", 0o600, tarBytes); err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	ex, err := s.agent.Exec(c, newID, &guestapi.ExecRequest{
+	ex, err := agent.Exec(c, newID, &guestapi.ExecRequest{
 		Cmd: "sh", Args: []string{"-c", "tar -xf /tmp/artifacts.tar -C / && rm /tmp/artifacts.tar"},
 	})
 	if err != nil || ex.ExitCode != 0 {
@@ -450,7 +555,15 @@ func (s *Server) snapshotSandbox(c *gin.Context) {
 	if body.Tag == "" {
 		body.Tag = "snap"
 	}
-	snapID, err := s.agent.SnapshotSandbox(c, id, body.Tag)
+	sb, ok := s.ownedSandbox(c, id)
+	if !ok {
+		return
+	}
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
+		return
+	}
+	snapID, err := agent.SnapshotSandbox(c, id, body.Tag)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
@@ -464,7 +577,11 @@ func (s *Server) killSandbox(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := s.agent.StopSandbox(c, id); err != nil {
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
+		return
+	}
+	if err := agent.StopSandbox(c, id); err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -486,7 +603,15 @@ func (s *Server) execSandbox(c *gin.Context) {
 		abortErr(c, http.StatusBadRequest, err)
 		return
 	}
-	resp, err := s.agent.Exec(c, c.Param("id"), &req)
+	sbEx, okEx := s.ownedSandbox(c, c.Param("id"))
+	if !okEx {
+		return
+	}
+	agentEx, okEx := s.agentOf(c, sbEx)
+	if !okEx {
+		return
+	}
+	resp, err := agentEx.Exec(c, c.Param("id"), &req)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
@@ -503,7 +628,15 @@ func (s *Server) readFile(c *gin.Context) {
 		abortErr(c, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	data, err := s.agent.ReadFile(c, c.Param("id"), path)
+	sbRf, okRf := s.ownedSandbox(c, c.Param("id"))
+	if !okRf {
+		return
+	}
+	agentRf, okRf := s.agentOf(c, sbRf)
+	if !okRf {
+		return
+	}
+	data, err := agentRf.ReadFile(c, c.Param("id"), path)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
@@ -534,7 +667,15 @@ func (s *Server) writeFile(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.agent.WriteFile(c, c.Param("id"), path, fs.FileMode(mode), data); err != nil {
+	sbWf, okWf := s.ownedSandbox(c, c.Param("id"))
+	if !okWf {
+		return
+	}
+	agentWf, okWf := s.agentOf(c, sbWf)
+	if !okWf {
+		return
+	}
+	if err := agentWf.WriteFile(c, c.Param("id"), path, fs.FileMode(mode), data); err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}

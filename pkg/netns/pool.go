@@ -35,10 +35,11 @@ func execRun(ctx context.Context, name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// Pool hands out namespace slots ember0..ember<size-1>.
+// Pool hands out namespace slots ember<base>..ember<base+size-1>.
 type Pool struct {
 	scriptDir string
 	size      int
+	base      int
 	run       runner
 
 	mu   sync.Mutex
@@ -49,7 +50,14 @@ type Pool struct {
 // NewPool prepares a pool of the given size whose setup/teardown scripts
 // live in scriptDir.
 func NewPool(scriptDir string, size int) *Pool {
-	return &Pool{scriptDir: scriptDir, size: size, run: execRun, used: map[int]bool{}}
+	return NewPoolAt(scriptDir, 0, size)
+}
+
+// NewPoolAt is NewPool with a starting slot id — multiple node agents on
+// one host (the CI 3-node cluster) partition the ember<N> namespace range
+// instead of colliding on it.
+func NewPoolAt(scriptDir string, base, size int) *Pool {
+	return &Pool{scriptDir: scriptDir, size: size, base: base, run: execRun, used: map[int]bool{}}
 }
 
 // Setup creates every namespace in the pool (idempotent per id via the
@@ -59,7 +67,7 @@ func (p *Pool) Setup(ctx context.Context) error {
 	p.free = p.free[:0]
 	p.mu.Unlock()
 	script := filepath.Join(p.scriptDir, "setup-network.sh")
-	for id := 0; id < p.size; id++ {
+	for id := p.base; id < p.base+p.size; id++ {
 		if _, err := p.run(ctx, script, "--id", strconv.Itoa(id)); err != nil {
 			return fmt.Errorf("setup netns ember%d: %w", id, err)
 		}
@@ -74,7 +82,7 @@ func (p *Pool) Setup(ctx context.Context) error {
 func (p *Pool) Teardown(ctx context.Context) error {
 	script := filepath.Join(p.scriptDir, "teardown-network.sh")
 	var firstErr error
-	for id := 0; id < p.size; id++ {
+	for id := p.base; id < p.base+p.size; id++ {
 		if _, err := p.run(ctx, script, "--id", strconv.Itoa(id)); err != nil && firstErr == nil {
 			firstErr = err
 		}

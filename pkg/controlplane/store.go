@@ -55,6 +55,8 @@ type Sandbox struct {
 	// RECYCLED (M3 selective restore); empty means keep nothing.
 	ArtifactPaths []string   `json:"artifact_paths,omitempty"`
 	PrewarmedAt   *time.Time `json:"prewarmed_at,omitempty"`
+	// NodeID is where the sandbox currently lives (M4 placement).
+	NodeID string `json:"node_id,omitempty"`
 }
 
 // Store is the PostgreSQL-backed persistence layer.
@@ -194,7 +196,7 @@ func (s *Store) CreateSandbox(ctx context.Context, sb Sandbox) (Sandbox, error) 
 		sb.ID, sb.TemplateID, sb.State, sb.VCPUs, sb.MemoryMiB, sb.DataDiskGiB, sb.Owner, sb.ArtifactPaths).
 		Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt)
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID)
 	return sb, err
 }
 
@@ -202,14 +204,14 @@ func scanSandbox(row pgx.Row) (Sandbox, error) {
 	var sb Sandbox
 	err := row.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 		&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-		&sb.ArtifactPaths, &sb.PrewarmedAt)
+		&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
 	return sb, err
 }
 
-const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at`
+const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at,node_id`
 
 // GetSandbox fetches a sandbox by id.
 func (s *Store) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
@@ -252,7 +254,7 @@ func (s *Store) ListSandboxes(ctx context.Context, owner, state string) ([]Sandb
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt); err != nil {
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)
@@ -392,6 +394,104 @@ func (s *Store) SetPrewarmedAt(ctx context.Context, id string, at *time.Time) er
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetSandboxNode records placement.
+func (s *Store) SetSandboxNode(ctx context.Context, id, nodeID string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE sandboxes SET node_id=$2, updated_at=now() WHERE id=$1`, id, nodeID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Node is a registered worker (M4 static membership).
+type Node struct {
+	ID          string    `json:"id"`
+	Addr        string    `json:"addr,omitempty"`
+	State       string    `json:"state"`
+	CapacityMiB int       `json:"capacity_mib"`
+	LastSeen    time.Time `json:"last_seen"`
+}
+
+// UpsertNode registers/refreshes a node.
+func (s *Store) UpsertNode(ctx context.Context, n Node) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO nodes (id, addr, state, capacity_mib, last_seen)
+		 VALUES ($1,$2,'up',$3,now())
+		 ON CONFLICT (id) DO UPDATE SET addr=$2, capacity_mib=$3`,
+		n.ID, n.Addr, n.CapacityMiB)
+	return err
+}
+
+// TouchNode records a successful health poll.
+func (s *Store) TouchNode(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET last_seen=now(), state='up' WHERE id=$1`, id)
+	return err
+}
+
+// SetNodeState flips a node up/down.
+func (s *Store) SetNodeState(ctx context.Context, id, state string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE nodes SET state=$2 WHERE id=$1`, id, state)
+	return err
+}
+
+// ListNodes returns the registry.
+func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, addr, state, capacity_mib, last_seen FROM nodes ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Node
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.ID, &n.Addr, &n.State, &n.CapacityMiB, &n.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// NodeUsage sums the memory of active sandboxes per node (the bin-packing
+// constraint; PostgreSQL is the single source of truth for placement).
+func (s *Store) NodeUsage(ctx context.Context) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT node_id, COALESCE(SUM(memory_mib),0) FROM sandboxes
+		 WHERE state IN ('STARTING','RUNNING','RESUMING','PAUSING') AND node_id <> ''
+		 GROUP BY node_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var used int
+		if err := rows.Scan(&id, &used); err != nil {
+			return nil, err
+		}
+		out[id] = used
+	}
+	return out, rows.Err()
+}
+
+// FailRunningOnNode marks a dead node's active sandboxes FAILED (their last
+// write-through snapshot remains restorable elsewhere).
+func (s *Store) FailRunningOnNode(ctx context.Context, nodeID, reason string) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandboxes SET state='FAILED', error=$2, updated_at=now()
+		 WHERE node_id=$1 AND state IN ('STARTING','RUNNING','RESUMING','PAUSING')`,
+		nodeID, reason)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // DeleteSandbox removes a sandbox row.

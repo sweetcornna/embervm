@@ -37,6 +37,15 @@ type TierAgent interface {
 	Prewarm(ctx context.Context, sandboxID, tier string) error
 }
 
+// AgentResolver routes a tier verb to the agent of the node a sandbox
+// lives on (M4 multi-node; SingleAgent for one-node deployments).
+type AgentResolver func(nodeID string) (TierAgent, error)
+
+// SingleAgent resolves every node id to one agent.
+func SingleAgent(a TierAgent) AgentResolver {
+	return func(string) (TierAgent, error) { return a, nil }
+}
+
 // EngineConfig sets the lifecycle engine's cadence. Each TTL measures time
 // spent in the CURRENT tier (updated_at), not since the original pause; a
 // zero TTL disables that transition.
@@ -106,18 +115,18 @@ func (c EngineConfig) withDefaults() EngineConfig {
 //     racing the prepare still finds the old tier intact; prepare failures
 //     leave the sandbox untouched and retry next tick.
 type Engine struct {
-	store *Store
-	agent TierAgent
-	l1    chunkstore.ListingBackend // warm object store (nil disables COLD/RECYCLE)
-	cold  chunkstore.ListingBackend // cold object store (nil disables COLD/RECYCLE)
-	cfg   EngineConfig
+	store    *Store
+	agentFor AgentResolver
+	l1       chunkstore.ListingBackend // warm object store (nil disables COLD/RECYCLE)
+	cold     chunkstore.ListingBackend // cold object store (nil disables COLD/RECYCLE)
+	cfg      EngineConfig
 }
 
 // NewEngine wires the lifecycle engine. l1/cold may be nil: WARM demotion
 // still works (the node agent guards its own L1 requirement); COLD archive
 // and RECYCLE require both. Call Run to start it.
-func NewEngine(store *Store, agent TierAgent, l1, cold chunkstore.ListingBackend, cfg EngineConfig) *Engine {
-	return &Engine{store: store, agent: agent, l1: l1, cold: cold, cfg: cfg.withDefaults()}
+func NewEngine(store *Store, agentFor AgentResolver, l1, cold chunkstore.ListingBackend, cfg EngineConfig) *Engine {
+	return &Engine{store: store, agentFor: agentFor, l1: l1, cold: cold, cfg: cfg.withDefaults()}
 }
 
 // Run scans until ctx is canceled.
@@ -199,7 +208,12 @@ func (e *Engine) recycleCold(ctx context.Context) error {
 	}
 	for _, sb := range due {
 		if len(sb.ArtifactPaths) > 0 {
-			if err := e.agent.ExtractArtifacts(ctx, sb.ID, sb.ArtifactPaths); err != nil {
+			agent, err := e.agentFor(sb.NodeID)
+			if err != nil {
+				log.Printf("lifecycle engine: recycle %s: %v", sb.ID, err)
+				continue
+			}
+			if err := agent.ExtractArtifacts(ctx, sb.ID, sb.ArtifactPaths); err != nil {
 				// Reads the cold copy, writes only the tarball — retryable.
 				log.Printf("lifecycle engine: extract artifacts %s: %v", sb.ID, err)
 				continue
@@ -358,7 +372,12 @@ func (e *Engine) prewarmScan(ctx context.Context) error {
 			if !prewarm.ShouldPrewarm(now, *sb.PausedAt, intervals, e.cfg.PrewarmLead) {
 				continue
 			}
-			if err := e.agent.Prewarm(ctx, sb.ID, tier); err != nil {
+			agent, err := e.agentFor(sb.NodeID)
+			if err != nil {
+				log.Printf("lifecycle engine: prewarm %s: %v", sb.ID, err)
+				continue
+			}
+			if err := agent.Prewarm(ctx, sb.ID, tier); err != nil {
 				log.Printf("lifecycle engine: prewarm %s (%s): %v", sb.ID, tier, err)
 				continue // advisory: never block the scan on a prewarm
 			}
@@ -426,8 +445,13 @@ func (e *Engine) demoteHotToWarm(ctx context.Context) error {
 		return err
 	}
 	for _, sb := range due {
+		agent, err := e.agentFor(sb.NodeID)
+		if err != nil {
+			log.Printf("lifecycle engine: demote %s: %v", sb.ID, err)
+			continue
+		}
 		if err := e.transition(ctx, sb.ID, lifecycle.StatePausedHot, lifecycle.StatePausedWarm,
-			func() error { return e.agent.ReleaseLocal(ctx, sb.ID) }); err != nil {
+			func() error { return agent.ReleaseLocal(ctx, sb.ID) }); err != nil {
 			return err
 		}
 	}

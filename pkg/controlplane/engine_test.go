@@ -111,7 +111,7 @@ func TestEngineDemotesHotToWarm(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	agent := newMockTierAgent()
-	e := NewEngine(s, agent, nil, nil, EngineConfig{TTLWarm: time.Minute})
+	e := NewEngine(s, SingleAgent(agent), nil, nil, EngineConfig{TTLWarm: time.Minute})
 
 	overdue := pausedSandbox(t, s, "PAUSED_HOT", 2*time.Minute)
 	fresh := pausedSandbox(t, s, "PAUSED_HOT", time.Second)
@@ -145,7 +145,7 @@ func TestEngineDemotesHotToWarm(t *testing.T) {
 func TestEngineZeroTTLDisables(t *testing.T) {
 	s := testStore(t)
 	agent := newMockTierAgent()
-	e := NewEngine(s, agent, nil, nil, EngineConfig{}) // all TTLs zero
+	e := NewEngine(s, SingleAgent(agent), nil, nil, EngineConfig{}) // all TTLs zero
 
 	id := pausedSandbox(t, s, "PAUSED_HOT", 24*time.Hour)
 	if err := e.tickOnce(context.Background()); err != nil {
@@ -165,7 +165,7 @@ func TestEngineActionFailureMarksFailed(t *testing.T) {
 	ctx := context.Background()
 	agent := newMockTierAgent()
 	agent.failNext = errors.New("dataset busy")
-	e := NewEngine(s, agent, nil, nil, EngineConfig{TTLWarm: time.Minute})
+	e := NewEngine(s, SingleAgent(agent), nil, nil, EngineConfig{TTLWarm: time.Minute})
 
 	id := pausedSandbox(t, s, "PAUSED_HOT", time.Hour)
 	if err := e.tickOnce(ctx); err != nil {
@@ -184,7 +184,7 @@ func TestEngineCASLosesToConcurrentChange(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	agent := newMockTierAgent()
-	e := NewEngine(s, agent, nil, nil, EngineConfig{TTLWarm: time.Minute})
+	e := NewEngine(s, SingleAgent(agent), nil, nil, EngineConfig{TTLWarm: time.Minute})
 
 	id := pausedSandbox(t, s, "PAUSED_HOT", time.Hour)
 	// A resume slipped in between the scan and the CAS.
@@ -294,7 +294,7 @@ func TestEngineArchivesWarmToCold(t *testing.T) {
 	ctx := context.Background()
 	agent := newMockTierAgent()
 	l1, cold := dirStores(t)
-	e := NewEngine(s, agent, l1, cold, EngineConfig{TTLCold: time.Minute, GCGrace: time.Nanosecond})
+	e := NewEngine(s, SingleAgent(agent), l1, cold, EngineConfig{TTLCold: time.Minute, GCGrace: time.Nanosecond})
 
 	id := pausedSandbox(t, s, "PAUSED_WARM", time.Hour)
 	hashes := seedWarmSnapshot(t, l1, id)
@@ -347,7 +347,7 @@ func TestEngineRecyclesCold(t *testing.T) {
 	ctx := context.Background()
 	agent := newMockTierAgent()
 	l1, cold := dirStores(t)
-	e := NewEngine(s, agent, l1, cold, EngineConfig{TTLRecycle: time.Minute, GCGrace: time.Nanosecond})
+	e := NewEngine(s, SingleAgent(agent), l1, cold, EngineConfig{TTLRecycle: time.Minute, GCGrace: time.Nanosecond})
 
 	id := pausedSandboxWithArtifacts(t, s, "ARCHIVED_COLD", time.Hour, []string{"/dirty.bin"})
 	// Simulate the archived state: objects live in cold.
@@ -389,7 +389,7 @@ func TestEnginePrewarmsPredictedWake(t *testing.T) {
 	ctx := context.Background()
 	agent := newMockTierAgent()
 	l1, cold := dirStores(t)
-	e := NewEngine(s, agent, l1, cold, EngineConfig{PrewarmLead: time.Hour})
+	e := NewEngine(s, SingleAgent(agent), l1, cold, EngineConfig{PrewarmLead: time.Hour})
 
 	id := pausedSandbox(t, s, "PAUSED_WARM", 25*time.Minute)
 	// History: three ~30-minute wake intervals -> predicted wake ≈ paused+28m,

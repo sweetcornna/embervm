@@ -61,8 +61,16 @@ func TestMachineTransition(t *testing.T) {
 }
 
 func TestTerminalStates(t *testing.T) {
-	if !StateStopped.Terminal() || !StateFailed.Terminal() {
-		t.Error("STOPPED and FAILED must be terminal")
+	if !StateStopped.Terminal() {
+		t.Error("STOPPED must be terminal")
+	}
+	// Since M4, FAILED is recoverable: a node death marks its actives
+	// FAILED and a resume re-places them from the last snapshot.
+	if StateFailed.Terminal() {
+		t.Error("FAILED must be recoverable (resume from last snapshot)")
+	}
+	if err := Validate(StateFailed, StateResuming); err != nil {
+		t.Errorf("FAILED -> RESUMING must be legal: %v", err)
 	}
 	if StateRunning.Terminal() {
 		t.Error("RUNNING must not be terminal")

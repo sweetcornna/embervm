@@ -22,6 +22,13 @@ type CreateSandboxRequest struct {
 	DataDiskGiB int    `json:"data_disk_gib"`
 }
 
+// NodeHealth is a node's capacity heartbeat (M4 scheduler polling).
+type NodeHealth struct {
+	CapacityMiB int `json:"capacity_mib"`
+	UsedMiB     int `json:"used_mib"`
+	Sandboxes   int `json:"sandboxes"`
+}
+
 // SandboxStatus is the node's view of a sandbox.
 type SandboxStatus struct {
 	SandboxID string `json:"sandbox_id"`
@@ -36,6 +43,9 @@ type SandboxStatus struct {
 // transport; the concrete agent dials guestd through the sandbox netns.
 type Agent interface {
 	BuildTemplate(ctx context.Context, templateID, image string) error
+
+	// Healthz is the scheduler's liveness + capacity poll.
+	Healthz(ctx context.Context) (NodeHealth, error)
 
 	CreateSandbox(ctx context.Context, req CreateSandboxRequest) (SandboxStatus, error)
 	StopSandbox(ctx context.Context, sandboxID string) error

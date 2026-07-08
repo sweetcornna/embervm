@@ -32,6 +32,9 @@ type Config struct {
 	// (fc_ver, kernel_ver) 标签).
 	FCVersion     string
 	KernelVersion string
+	// CapacityMiB is the memory the scheduler may pack onto this node
+	// (0 = unlimited, single-node dev).
+	CapacityMiB int
 
 	// BootExtraArgs is appended to the guest kernel command line; defaults to
 	// the docs/zh/04 §5 microVM args.

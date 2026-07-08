@@ -167,7 +167,7 @@ func TestLifecycleTTLFlow(t *testing.T) {
 		t.Fatalf("cold store: ok=%v err=%v", ok, err)
 	}
 
-	engine := controlplane.NewEngine(store, agent.(*nodeagent.Agent), l1, cold, controlplane.EngineConfig{
+	engine := controlplane.NewEngine(store, controlplane.SingleAgent(agent.(*nodeagent.Agent)), l1, cold, controlplane.EngineConfig{
 		Tick:       300 * time.Millisecond,
 		TTLWarm:    2 * time.Second,
 		TTLCold:    3 * time.Second,

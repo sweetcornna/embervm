@@ -41,6 +41,10 @@ var transitions = map[State]map[State]bool{
 	StateRecycled:     {StateStopping: true},
 	StateResuming:     {StateRunning: true},
 	StateStopping:     {StateStopped: true},
+	// A FAILED sandbox may attempt recovery from its last write-through
+	// snapshot (M4: node death marks its actives FAILED; resume re-places
+	// them) or be stopped. A restore that fails lands back in FAILED.
+	StateFailed: {StateResuming: true, StateStopping: true},
 }
 
 // activeStates may always fail.
@@ -52,7 +56,7 @@ var activeStates = map[State]bool{
 
 // Terminal reports whether no transition leaves s.
 func (s State) Terminal() bool {
-	return s == StateStopped || s == StateFailed
+	return s == StateStopped
 }
 
 // Paused reports whether s is a paused/archived tier that a TTL transition

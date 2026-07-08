@@ -22,6 +22,7 @@ import (
 func NewServer(a Agent) http.Handler {
 	s := &server{agent: a}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("POST /templates/{id}/build", s.buildTemplate)
 	mux.HandleFunc("POST /sandboxes", s.createSandbox)
 	mux.HandleFunc("GET /sandboxes/{id}", s.status)
@@ -52,6 +53,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func fail(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusInternalServerError, guestapi.ErrorResponse{Error: err.Error()})
+}
+
+func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
+	h, err := s.agent.Healthz(r.Context())
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
 }
 
 func (s *server) buildTemplate(w http.ResponseWriter, r *http.Request) {
@@ -306,6 +316,12 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return json.NewDecoder(resp.Body).Decode(respBody)
 	}
 	return nil
+}
+
+func (c *Client) Healthz(ctx context.Context) (NodeHealth, error) {
+	var h NodeHealth
+	err := c.do(ctx, http.MethodGet, "/healthz", nil, nil, &h)
+	return h, err
 }
 
 func (c *Client) BuildTemplate(ctx context.Context, templateID, image string) error {

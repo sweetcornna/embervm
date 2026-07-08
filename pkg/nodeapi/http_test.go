@@ -26,6 +26,9 @@ type mockAgent struct {
 }
 
 func (m *mockAgent) BuildTemplate(_ context.Context, id, image string) error { return nil }
+func (m *mockAgent) Healthz(context.Context) (NodeHealth, error) {
+	return NodeHealth{CapacityMiB: 4096, UsedMiB: 512, Sandboxes: 2}, nil
+}
 func (m *mockAgent) CreateSandbox(_ context.Context, req CreateSandboxRequest) (SandboxStatus, error) {
 	m.lastCreate = req
 	return SandboxStatus{SandboxID: req.SandboxID, State: "RUNNING", GuestAddr: "172.16.0.2:7777", Netns: "ember0"}, nil

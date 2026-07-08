@@ -60,7 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("lifecycle engine config: %v", err)
 	}
-	engine := controlplane.NewEngine(store, agent, l1, cold, engCfg)
+	engine := controlplane.NewEngine(store, controlplane.SingleAgent(agent), l1, cold, engCfg)
 	go engine.Run(ctx)
 
 	srv := controlplane.NewServer(store, agent, tokens, l1, cold)

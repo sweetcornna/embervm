@@ -22,7 +22,10 @@ type cpMockAgent struct {
 }
 
 func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
-func (m *cpMockAgent) ReleaseLocal(context.Context, string) error              { return nil }
+func (m *cpMockAgent) Healthz(context.Context) (nodeapi.NodeHealth, error) {
+	return nodeapi.NodeHealth{CapacityMiB: 8192}, nil
+}
+func (m *cpMockAgent) ReleaseLocal(context.Context, string) error { return nil }
 func (m *cpMockAgent) RestoreSandbox(_ context.Context, id, _ string) (nodeapi.SandboxStatus, error) {
 	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING"}, nil
 }

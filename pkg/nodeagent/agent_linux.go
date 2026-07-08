@@ -458,6 +458,25 @@ func (a *Agent) WriteFile(ctx context.Context, sandboxID, path string, mode fs.F
 
 // --- helpers ---------------------------------------------------------------
 
+// Healthz reports capacity for the scheduler's poll.
+func (a *Agent) Healthz(_ context.Context) (nodeapi.NodeHealth, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	used := 0
+	for _, sb := range a.sbx {
+		st := sb.machine.State()
+		if st == lifecycle.StateRunning || st == lifecycle.StateStarting ||
+			st == lifecycle.StateResuming || st == lifecycle.StatePausing {
+			used += sb.memMiB
+		}
+	}
+	return nodeapi.NodeHealth{
+		CapacityMiB: a.cfg.CapacityMiB,
+		UsedMiB:     used,
+		Sandboxes:   len(a.sbx),
+	}, nil
+}
+
 // WorkDirOf returns a sandbox's runtime directory (tests and debugging).
 func (a *Agent) WorkDirOf(sandboxID string) string {
 	return filepath.Join(a.cfg.WorkDir, sandboxID)
