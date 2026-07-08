@@ -54,6 +54,13 @@ type TemplateChecker interface {
 	HasTemplate(ctx context.Context, templateID string) bool
 }
 
+// Rollbacker is the optional layer-switch primitive behind M5 rollback: the
+// sandbox's storage returns to an earlier snapshot in place, discarding the
+// snapshots after it. ZFS-only (the plain dev backend has no snapshots).
+type Rollbacker interface {
+	RollbackSandbox(ctx context.Context, sandboxID, tag string) error
+}
+
 // idRE constrains IDs to safe dataset/path components.
 var idRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 

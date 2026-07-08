@@ -94,6 +94,13 @@ type Agent interface {
 	Prewarm(ctx context.Context, sandboxID, tier string) error
 	// SetBalloon retargets a running sandbox's balloon (memory reclaim).
 	SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error
+	// Fork creates a new sandbox from a parent's checkpoint layer ("p<N>")
+	// without touching the parent; Rollback switches a sandbox back to an
+	// earlier checkpoint layer in place, discarding everything after it
+	// (M5, ADR-0006). Both require chunked mode; fork additionally needs
+	// the jailer (chroot-relative snapfile paths) and same-node placement.
+	Fork(ctx context.Context, parentID, layer, newID string) (SandboxStatus, error)
+	Rollback(ctx context.Context, sandboxID, layer string) (SandboxStatus, error)
 
 	Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error)
 	Health(ctx context.Context, sandboxID string) (*guestapi.HealthResponse, error)

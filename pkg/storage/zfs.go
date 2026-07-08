@@ -168,6 +168,22 @@ func (b *ZFSBackend) CloneSandboxFrom(ctx context.Context, newID, srcID, tag str
 	}, nil
 }
 
+// RollbackSandbox implements Rollbacker: the dataset returns to @tag in
+// place (same name, same mountpoint — no jail rebind). -r destroys the
+// snapshots after @tag; ZFS itself refuses when one of them has dependent
+// clones, which is exactly the fork-lineage guard surfacing at the bottom
+// layer (the control plane refuses politely first).
+func (b *ZFSBackend) RollbackSandbox(ctx context.Context, sandboxID, tag string) error {
+	if err := validateID("sandbox", sandboxID); err != nil {
+		return err
+	}
+	if err := validateID("tag", tag); err != nil {
+		return err
+	}
+	_, err := b.run(ctx, "zfs", "rollback", "-r", b.sandboxDS(sandboxID)+"@"+tag)
+	return err
+}
+
 // Snapshot implements Backend.
 func (b *ZFSBackend) Snapshot(ctx context.Context, sandboxID, tag string) (string, error) {
 	if err := validateID("sandbox", sandboxID); err != nil {

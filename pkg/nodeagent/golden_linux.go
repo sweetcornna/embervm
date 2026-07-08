@@ -13,8 +13,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/embervm/embervm/pkg/lifecycle"
-	"github.com/embervm/embervm/pkg/memsnap"
 	"github.com/embervm/embervm/pkg/nodeapi"
 	"github.com/embervm/embervm/pkg/storage"
 )
@@ -134,81 +132,21 @@ func (a *Agent) goldenFor(ctx context.Context, templateID string, req nodeapi.Cr
 }
 
 // fastCreate clones the golden snapshot into a new identity and hot-restores
-// its memory image. Returns through the same status shape as a cold boot.
+// its memory image — a fork whose parent is the template's golden sandbox.
 func (a *Agent) fastCreate(ctx context.Context, req nodeapi.CreateSandboxRequest, meta goldenMeta) (nodeapi.SandboxStatus, error) {
-	zfs, ok := a.cfg.Storage.(*storage.ZFSBackend)
-	if !ok {
-		return nodeapi.SandboxStatus{}, fmt.Errorf("fast create: requires the ZFS backend")
-	}
-	paths, err := zfs.CloneSandboxFrom(ctx, req.SandboxID, meta.SandboxID, "p1")
-	if err != nil {
-		return nodeapi.SandboxStatus{}, fmt.Errorf("fast create: clone golden: %w", err)
-	}
-	lease, err := a.cfg.Pool.Acquire()
-	if err != nil {
-		_ = a.cfg.Storage.DestroySandbox(ctx, req.SandboxID)
-		return nodeapi.SandboxStatus{}, err
-	}
-
-	sb := &sandbox{
-		id:          req.SandboxID,
-		machine:     lifecycle.New(lifecycle.StatePausedHot),
-		lease:       lease,
-		dir:         filepath.Join(a.cfg.WorkDir, req.SandboxID),
+	st, err := a.cloneRestore(ctx, cloneSpec{
+		newID:       req.SandboxID,
+		srcID:       meta.SandboxID,
+		srcSnapDir:  filepath.Join(a.cfg.WorkDir, meta.SandboxID, "snap"),
+		layers:      []string{"p1"}, // the golden pauses exactly once
+		templateID:  req.TemplateID,
 		vcpus:       meta.VCPUs,
 		memMiB:      meta.MemoryMiB,
-		rootfs:      paths.RootfsExt4,
-		dataRaw:     paths.DataRaw,
-		templateID:  req.TemplateID,
 		dataDiskGiB: meta.DataDiskGiB,
-		mountDir:    paths.Dir,
 		egress:      req.Egress,
-		snapCount:   1, // the golden's p1 is this chain's root
-		snapLayer:   "p1",
-		diskOrigin:  &DiskOrigin{SandboxID: meta.SandboxID, Tag: "p1"},
-	}
-	if err := os.MkdirAll(sb.snapDir(), 0o755); err != nil {
-		a.cleanup(ctx, sb)
-		return nodeapi.SandboxStatus{}, err
-	}
-	if err := a.applyEgress(ctx, sb); err != nil {
-		a.cleanup(ctx, sb)
-		return nodeapi.SandboxStatus{}, fmt.Errorf("apply egress policy: %w", err)
-	}
-	// The golden's staging artifacts become the clone's chain root.
-	goldenSnap := filepath.Join(a.cfg.WorkDir, meta.SandboxID, "snap")
-	for _, f := range []string{"layer-p1.json", "snapfile-p1", "ws.json"} {
-		src := filepath.Join(goldenSnap, f)
-		if _, err := os.Stat(src); err != nil {
-			if f == "ws.json" {
-				continue // golden never resumed: no working set yet
-			}
-			a.cleanup(ctx, sb)
-			return nodeapi.SandboxStatus{}, fmt.Errorf("fast create: golden artifact %s: %w", f, err)
-		}
-		if err := copyFileSimple(filepath.Join(sb.snapDir(), f), src); err != nil {
-			a.cleanup(ctx, sb)
-			return nodeapi.SandboxStatus{}, err
-		}
-	}
-	m, err := memsnap.ReadManifest(filepath.Join(sb.snapDir(), "layer-p1.json"))
+	})
 	if err != nil {
-		a.cleanup(ctx, sb)
-		return nodeapi.SandboxStatus{}, err
-	}
-	sb.layers = []*memsnap.Manifest{m}
-
-	a.mu.Lock()
-	a.sbx[req.SandboxID] = sb
-	a.mu.Unlock()
-
-	st, err := a.resume(ctx, req.SandboxID)
-	if err != nil {
-		a.mu.Lock()
-		delete(a.sbx, req.SandboxID)
-		a.mu.Unlock()
-		a.cleanup(ctx, sb)
-		return nodeapi.SandboxStatus{}, fmt.Errorf("fast create: restore golden image: %w", err)
+		return nodeapi.SandboxStatus{}, fmt.Errorf("fast create: %w", err)
 	}
 	return st, nil
 }

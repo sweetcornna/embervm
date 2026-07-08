@@ -119,3 +119,28 @@ func TestGuestProxyNotRegisteredWithoutDialer(t *testing.T) {
 		t.Errorf("status = %d, want 404 (route absent)", rec.Code)
 	}
 }
+
+func TestForkRollbackRoundtrip(t *testing.T) {
+	m := &mockAgent{}
+	c := serveMock(t, m)
+	ctx := context.Background()
+
+	st, err := c.Fork(ctx, "parent1", "p3", "child1")
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if st.SandboxID != "child1" || st.State != "RUNNING" {
+		t.Errorf("fork status = %+v", st)
+	}
+	if m.lastFork.parent != "parent1" || m.lastFork.layer != "p3" || m.lastFork.newID != "child1" {
+		t.Errorf("server saw fork %+v", m.lastFork)
+	}
+
+	st, err = c.Rollback(ctx, "sb1", "p2")
+	if err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if st.SandboxID != "sb1" || m.lastRollback != "p2" {
+		t.Errorf("rollback status = %+v, server saw layer %q", st, m.lastRollback)
+	}
+}

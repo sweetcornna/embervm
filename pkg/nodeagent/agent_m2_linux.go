@@ -169,6 +169,12 @@ func (a *Agent) pushL1(ctx context.Context, sb *sandbox, m *memsnap.Manifest, la
 			return err
 		}
 	}
+	return a.pushDescriptor(ctx, sb, hasWS)
+}
+
+// pushDescriptor (re)writes the L1 restore descriptor from the sandbox's
+// current chain — the pause write-through and the M5 rollback trim share it.
+func (a *Agent) pushDescriptor(ctx context.Context, sb *sandbox, hasWS bool) error {
 	desc := SnapshotDescriptor{
 		FormatVersion: 1,
 		SandboxID:     sb.id,

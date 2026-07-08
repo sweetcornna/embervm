@@ -35,6 +35,12 @@ func (m *cpMockAgent) RestoreSandbox(_ context.Context, id, _ string) (nodeapi.S
 func (m *cpMockAgent) ExtractArtifacts(context.Context, string, []string) error { return nil }
 func (m *cpMockAgent) Prewarm(context.Context, string, string) error            { return nil }
 func (m *cpMockAgent) SetBalloon(context.Context, string, int) error            { return nil }
+func (m *cpMockAgent) Fork(_ context.Context, _, _, newID string) (nodeapi.SandboxStatus, error) {
+	return nodeapi.SandboxStatus{SandboxID: newID, State: "RUNNING", Netns: "ember1"}, nil
+}
+func (m *cpMockAgent) Rollback(_ context.Context, id, _ string) (nodeapi.SandboxStatus, error) {
+	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING", Netns: "ember0"}, nil
+}
 func (m *cpMockAgent) CreateSandbox(_ context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
 	if m.createErr != nil {
 		return nodeapi.SandboxStatus{}, m.createErr

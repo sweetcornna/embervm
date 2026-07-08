@@ -22,8 +22,10 @@ type mockAgent struct {
 		mode fs.FileMode
 		data []byte
 	}
-	lastBalloon int
-	failStop    bool
+	lastBalloon  int
+	lastFork     struct{ parent, layer, newID string }
+	lastRollback string
+	failStop     bool
 }
 
 func (m *mockAgent) BuildTemplate(_ context.Context, id, image string) error { return nil }
@@ -61,6 +63,14 @@ func (m *mockAgent) Prewarm(_ context.Context, id, tier string) error { return n
 func (m *mockAgent) SetBalloon(_ context.Context, id string, mib int) error {
 	m.lastBalloon = mib
 	return nil
+}
+func (m *mockAgent) Fork(_ context.Context, parentID, layer, newID string) (SandboxStatus, error) {
+	m.lastFork = struct{ parent, layer, newID string }{parentID, layer, newID}
+	return SandboxStatus{SandboxID: newID, State: "RUNNING", Netns: "ember1"}, nil
+}
+func (m *mockAgent) Rollback(_ context.Context, id, layer string) (SandboxStatus, error) {
+	m.lastRollback = layer
+	return SandboxStatus{SandboxID: id, State: "RUNNING"}, nil
 }
 
 func (m *mockAgent) Exec(_ context.Context, id string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {

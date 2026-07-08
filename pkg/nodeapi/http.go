@@ -37,6 +37,8 @@ func NewServer(a Agent) http.Handler {
 	mux.HandleFunc("POST /sandboxes/{id}/extract-artifacts", s.extractArtifacts)
 	mux.HandleFunc("POST /sandboxes/{id}/prewarm", s.prewarm)
 	mux.HandleFunc("POST /sandboxes/{id}/balloon", s.setBalloon)
+	mux.HandleFunc("POST /sandboxes/{id}/fork", s.fork)
+	mux.HandleFunc("POST /sandboxes/{id}/rollback", s.rollback)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.exec)
 	mux.HandleFunc("GET /sandboxes/{id}/health", s.health)
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.readFile)
@@ -254,6 +256,39 @@ func (s *server) setBalloon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
+func (s *server) fork(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Layer string `json:"layer"`
+		NewID string `json:"new_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: err.Error()})
+		return
+	}
+	st, err := s.agent.Fork(r.Context(), r.PathValue("id"), body.Layer, body.NewID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *server) rollback(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Layer string `json:"layer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: err.Error()})
+		return
+	}
+	st, err := s.agent.Rollback(r.Context(), r.PathValue("id"), body.Layer)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
 func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 	var req guestapi.ExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -461,6 +496,20 @@ var _ GuestProxier = (*Client)(nil)
 func (c *Client) SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error {
 	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/balloon", nil,
 		map[string]int{"target_mib": targetMiB}, nil)
+}
+
+func (c *Client) Fork(ctx context.Context, parentID, layer, newID string) (SandboxStatus, error) {
+	var st SandboxStatus
+	err := c.do(ctx, http.MethodPost, "/sandboxes/"+parentID+"/fork", nil,
+		map[string]string{"layer": layer, "new_id": newID}, &st)
+	return st, err
+}
+
+func (c *Client) Rollback(ctx context.Context, sandboxID, layer string) (SandboxStatus, error) {
+	var st SandboxStatus
+	err := c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/rollback", nil,
+		map[string]string{"layer": layer}, &st)
+	return st, err
 }
 
 func (c *Client) Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {
