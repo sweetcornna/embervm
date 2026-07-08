@@ -88,6 +88,19 @@ func backendContract(t *testing.T, b Backend) {
 	if _, err := b.GetObject(ctx, "sandboxes/sb1/absent.json"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetObject missing = %v, want ErrNotFound", err)
 	}
+	if err := b.DeleteObject(ctx, "sandboxes/sb1/layer-p1.json"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := b.HasObject(ctx, "sandboxes/sb1/layer-p1.json"); ok {
+		t.Fatal("object still present after DeleteObject")
+	}
+	if err := b.DeleteObject(ctx, "sandboxes/sb1/layer-p1.json"); err != nil {
+		t.Fatalf("DeleteObject of absent key = %v, want nil", err)
+	}
+	if err := b.PutObject(ctx, "sandboxes/sb1/layer-p1.json", bytes.NewReader(meta), int64(len(meta))); err != nil {
+		t.Fatal(err)
+	}
+
 	// Overwrite is allowed for named objects (manifests are immutable by
 	// convention, ws.json is rolling-updated).
 	meta2 := []byte(`{"layer_id":"p1","v":2}`)

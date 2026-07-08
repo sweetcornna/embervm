@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,12 +15,12 @@ import (
 
 	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/lifecycle"
+	"github.com/embervm/embervm/pkg/memsnap"
 	"github.com/embervm/embervm/pkg/storage"
 	"github.com/klauspost/compress/zstd"
 )
 
 // keyArtifacts is where ExtractArtifacts leaves the RECYCLED remnant.
-func keyArtifacts(id string) string { return "sandboxes/" + id + "/artifacts.tar.zst" }
 
 // ReleaseLocal frees every node-local resource of a paused sandbox
 // (HOT→WARM): dataset, workdir, netns lease, in-memory entry. It refuses
@@ -37,7 +38,7 @@ func (a *Agent) ReleaseLocal(ctx context.Context, sandboxID string) error {
 	if a.l1 == nil {
 		return fmt.Errorf("release %s: no L1 configured", sandboxID)
 	}
-	ok, err := a.l1.HasObject(ctx, keySnapshotJSON(sandboxID))
+	ok, err := a.l1.HasObject(ctx, KeySnapshotJSON(sandboxID))
 	if err != nil {
 		return fmt.Errorf("release %s: verify descriptor: %w", sandboxID, err)
 	}
@@ -99,6 +100,88 @@ func handlerEnvForTier(tier string) []string {
 	return env
 }
 
+// Prewarm pulls a paused sandbox's working-set chunks from the tier's
+// store into the node-local cache so a subsequent restore's eager WS
+// prefetch hits locally (predicted-wake pull, docs/zh/04 #5). Without a
+// recorded working set every referenced chunk is pulled instead.
+func (a *Agent) Prewarm(ctx context.Context, sandboxID, tier string) error {
+	src, err := a.tierStore(tier)
+	if err != nil {
+		return fmt.Errorf("prewarm %s: %w", sandboxID, err)
+	}
+	if a.localStore == nil {
+		return fmt.Errorf("prewarm %s: requires restore_mode=chunked", sandboxID)
+	}
+	var desc SnapshotDescriptor
+	if err := getJSONFrom(ctx, src, KeySnapshotJSON(sandboxID), &desc); err != nil {
+		return fmt.Errorf("prewarm %s: descriptor: %w", sandboxID, err)
+	}
+	layers := make([]*memsnap.Manifest, 0, len(desc.Layers))
+	for _, layer := range desc.Layers {
+		rc, err := src.GetObject(ctx, KeyLayer(sandboxID, layer))
+		if err != nil {
+			return fmt.Errorf("prewarm %s: manifest %s: %w", sandboxID, layer, err)
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+		m, err := memsnap.ParseManifest(data)
+		if err != nil {
+			return fmt.Errorf("prewarm %s: %w", sandboxID, err)
+		}
+		layers = append(layers, m)
+	}
+	view, err := memsnap.Resolve(layers)
+	if err != nil {
+		return fmt.Errorf("prewarm %s: %w", sandboxID, err)
+	}
+
+	var hashes []string
+	seen := map[string]bool{}
+	addChunk := func(ref memsnap.ChunkRef) {
+		if !ref.Zero && ref.Hash != "" && !seen[ref.Hash] {
+			seen[ref.Hash] = true
+			hashes = append(hashes, ref.Hash)
+		}
+	}
+	ws := readWSChunks(ctx, src, sandboxID)
+	if desc.HasWS && len(ws) > 0 {
+		for _, ci := range ws {
+			if ci >= 0 && ci < len(view.Chunks) {
+				addChunk(view.Chunks[ci])
+			}
+		}
+	} else {
+		for _, ref := range view.Chunks {
+			addChunk(ref)
+		}
+	}
+	n, err := (chunkstore.Copier{Src: src, Dst: a.localStore}).Copy(ctx, hashes)
+	if err != nil {
+		return fmt.Errorf("prewarm %s: pull chunks: %w", sandboxID, err)
+	}
+	log.Printf("nodeagent: prewarmed %s from %s: %d/%d chunks pulled", sandboxID, tier, n, len(hashes))
+	return nil
+}
+
+// readWSChunks best-effort loads the recorded working-set chunk order.
+func readWSChunks(ctx context.Context, src chunkstore.Objects, sandboxID string) []int {
+	rc, err := src.GetObject(ctx, KeyWS(sandboxID))
+	if err != nil {
+		return nil
+	}
+	defer rc.Close()
+	var trace struct {
+		Chunks []int `json:"chunks"`
+	}
+	if err := decodeJSONBody(rc, &trace); err != nil {
+		return nil
+	}
+	return trace.Chunks
+}
+
 // ExtractArtifacts materializes the archived disk of a COLD sandbox on this
 // node, tars the requested guest paths (missing ones are skipped, not
 // errors), and stores sandboxes/<id>/artifacts.tar.zst in the cold store —
@@ -111,20 +194,20 @@ func (a *Agent) ExtractArtifacts(ctx context.Context, sandboxID string, paths []
 	if a.cold == nil || a.l1 == nil {
 		return fmt.Errorf("extract %s: needs both L1 and cold stores", sandboxID)
 	}
-	var desc snapshotDescriptor
-	if err := getJSONFrom(ctx, a.cold, keySnapshotJSON(sandboxID), &desc); err != nil {
+	var desc SnapshotDescriptor
+	if err := getJSONFrom(ctx, a.cold, KeySnapshotJSON(sandboxID), &desc); err != nil {
 		return fmt.Errorf("extract %s: descriptor: %w", sandboxID, err)
 	}
 
 	// Disk chain: template lineage from L1, deltas from the cold store.
-	if err := a.receiveObject(ctx, keyTemplateStream(desc.TemplateID), func(r io.Reader) error {
+	if err := a.receiveObject(ctx, KeyTemplateStream(desc.TemplateID), func(r io.Reader) error {
 		return repl.ReceiveTemplate(ctx, desc.TemplateID, r)
 	}); err != nil {
 		return fmt.Errorf("extract %s: template: %w", sandboxID, err)
 	}
 	_ = a.cfg.Storage.DestroySandbox(ctx, sandboxID) // scratch must start clean
 	for _, layer := range desc.DiskLayers {
-		rc, err := a.cold.GetObject(ctx, keyDiskDelta(sandboxID, layer))
+		rc, err := a.cold.GetObject(ctx, KeyDiskDelta(sandboxID, layer))
 		if err != nil {
 			return fmt.Errorf("extract %s: disk %s: %w", sandboxID, layer, err)
 		}
@@ -154,7 +237,7 @@ func (a *Agent) ExtractArtifacts(ctx context.Context, sandboxID string, paths []
 		}
 	}()
 
-	return a.putStream(ctx, keyArtifacts(sandboxID), func(w io.Writer) error {
+	return a.putStream(ctx, KeyArtifacts(sandboxID), func(w io.Writer) error {
 		return writeArtifactsTar(w, mounts, paths)
 	})
 }

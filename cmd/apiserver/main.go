@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/controlplane"
 	"github.com/embervm/embervm/pkg/nodeapi"
 )
@@ -47,7 +48,22 @@ func main() {
 	}
 
 	agent := nodeapi.NewClient(*naSocket)
-	srv := controlplane.NewServer(store, agent, tokens)
+	l1, _, err := chunkstore.L1FromEnv()
+	if err != nil {
+		log.Fatalf("L1 store: %v", err)
+	}
+	cold, _, err := chunkstore.ColdFromEnv()
+	if err != nil {
+		log.Fatalf("cold store: %v", err)
+	}
+	engCfg, err := controlplane.EngineConfigFromEnv()
+	if err != nil {
+		log.Fatalf("lifecycle engine config: %v", err)
+	}
+	engine := controlplane.NewEngine(store, agent, l1, cold, engCfg)
+	go engine.Run(ctx)
+
+	srv := controlplane.NewServer(store, agent, tokens, l1, cold)
 
 	fmt.Printf("apiserver listening addr=%s nodeagent=%s\n", *listen, *naSocket)
 	if err := http.ListenAndServe(*listen, srv.Handler()); err != nil {

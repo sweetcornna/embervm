@@ -171,6 +171,14 @@ func (s *S3) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	return obj, nil
 }
 
+func (s *S3) DeleteObject(ctx context.Context, key string) error {
+	err := s.c.RemoveObject(ctx, s.cfg.Bucket, s.objectKey(key), minio.RemoveObjectOptions{})
+	if err != nil && !notFound(err) {
+		return fmt.Errorf("object %s: delete: %w", key, err)
+	}
+	return nil
+}
+
 func (s *S3) HasObject(ctx context.Context, key string) (bool, error) {
 	_, err := s.c.StatObject(ctx, s.cfg.Bucket, s.objectKey(key), minio.StatObjectOptions{})
 	if err != nil {

@@ -53,6 +53,9 @@ type Agent interface {
 	ReleaseLocal(ctx context.Context, sandboxID string) error
 	RestoreSandbox(ctx context.Context, sandboxID, tier string) (SandboxStatus, error)
 	ExtractArtifacts(ctx context.Context, sandboxID string, paths []string) error
+	// Prewarm pulls the sandbox's working-set chunks from the tier's store
+	// into the node-local cache ahead of a predicted wake.
+	Prewarm(ctx context.Context, sandboxID, tier string) error
 
 	Exec(ctx context.Context, sandboxID string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error)
 	Health(ctx context.Context, sandboxID string) (*guestapi.HealthResponse, error)

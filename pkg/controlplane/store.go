@@ -278,6 +278,7 @@ func (s *Store) SetSandboxState(ctx context.Context, id, from, to, netns, errMsg
 		`UPDATE sandboxes SET state=$2, error=$3,
 		   netns=COALESCE(NULLIF($4,''), netns),
 		   paused_at=COALESCE($5, paused_at),
+		   prewarmed_at=CASE WHEN $2='PAUSED_HOT' THEN NULL ELSE prewarmed_at END,
 		   updated_at=now()
 		 WHERE id=$1`,
 		id, to, errMsg, netns, pausedAt)
@@ -305,7 +306,10 @@ func (s *Store) TransitionSandbox(ctx context.Context, id, from, to, errMsg stri
 	}
 	defer tx.Rollback(ctx)
 	tag, err := tx.Exec(ctx,
-		`UPDATE sandboxes SET state=$3, error=$4, updated_at=now() WHERE id=$1 AND state=$2`,
+		`UPDATE sandboxes SET state=$3, error=$4,
+		   prewarmed_at=CASE WHEN $3='PAUSED_HOT' THEN NULL ELSE prewarmed_at END,
+		   updated_at=now()
+		 WHERE id=$1 AND state=$2`,
 		id, from, to, errMsg)
 	if err != nil {
 		return err
@@ -341,6 +345,38 @@ func (s *Store) ListTransitionDue(ctx context.Context, state string, before time
 			return nil, err
 		}
 		out = append(out, sb)
+	}
+	return out, rows.Err()
+}
+
+// WakeIntervals returns the durations between each pause and the following
+// resume (oldest first) — the pre-warm predictor's input.
+func (s *Store) WakeIntervals(ctx context.Context, id string) ([]time.Duration, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT to_state, at FROM sandbox_events
+		 WHERE sandbox_id=$1 AND to_state IN ('PAUSED_HOT','RESUMING') ORDER BY at, id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []time.Duration
+	var pausedAt *time.Time
+	for rows.Next() {
+		var state string
+		var at time.Time
+		if err := rows.Scan(&state, &at); err != nil {
+			return nil, err
+		}
+		switch state {
+		case "PAUSED_HOT":
+			t := at
+			pausedAt = &t
+		case "RESUMING":
+			if pausedAt != nil {
+				out = append(out, at.Sub(*pausedAt))
+				pausedAt = nil
+			}
+		}
 	}
 	return out, rows.Err()
 }

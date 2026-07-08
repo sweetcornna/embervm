@@ -141,6 +141,19 @@ func (m *Manifest) WriteFile(path string) error {
 	return os.Rename(tmp, path)
 }
 
+// ParseManifest decodes and validates a manifest from raw JSON (object
+// stores hand back bytes, not paths).
+func ParseManifest(data []byte) (*Manifest, error) {
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("parse manifest: %w", err)
+	}
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 // ReadManifest loads and validates a layer manifest.
 func ReadManifest(path string) (*Manifest, error) {
 	data, err := os.ReadFile(path)

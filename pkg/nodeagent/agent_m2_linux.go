@@ -22,37 +22,6 @@ import (
 	"github.com/embervm/embervm/pkg/storage"
 )
 
-// snapshotDescriptor is the restore entry point a node publishes to L1 on
-// every pause: everything another node needs to rebuild the sandbox.
-// Producer is the pause path; consumers mirror it exactly.
-type snapshotDescriptor struct {
-	FormatVersion int      `json:"format_version"`
-	SandboxID     string   `json:"sandbox_id"`
-	TemplateID    string   `json:"template_id"`
-	VCPUs         int      `json:"vcpus"`
-	MemoryMiB     int      `json:"memory_mib"`
-	DataDiskGiB   int      `json:"data_disk_gib"`
-	Dir           string   `json:"dir"`    // dataset mountpoint; snapfile drive paths point here
-	Layers        []string `json:"layers"` // memory chain order, full root first: ["p1", "p2", ...]
-	HasWS         bool     `json:"has_ws"`
-	// M3 tiering (additive; consumers tolerate their absence in old
-	// descriptors). Tier names the store the objects live in; DiskLayers is
-	// the zfs delta chain (it can outlive memory-chain restarts, e.g. after
-	// a cold restore forces a fresh Full); SnapSeq seeds the next layer
-	// number so tags never collide across restores.
-	Tier       string   `json:"tier,omitempty"`
-	DiskLayers []string `json:"disk_layers,omitempty"`
-	SnapSeq    int      `json:"snap_seq,omitempty"`
-}
-
-// L1 object keys, all under the store's meta/ namespace.
-func keySnapshotJSON(id string) string     { return "sandboxes/" + id + "/snapshot.json" }
-func keyLayer(id, layer string) string     { return "sandboxes/" + id + "/layer-" + layer + ".json" }
-func keySnapfile(id, layer string) string  { return "sandboxes/" + id + "/snapfile-" + layer }
-func keyWS(id string) string               { return "sandboxes/" + id + "/ws.json" }
-func keyDiskDelta(id, layer string) string { return "sandboxes/" + id + "/disk-" + layer + ".zstream" }
-func keyTemplateStream(tid string) string  { return "templates/" + tid + ".zstream" }
-
 func (sb *sandbox) snapDir() string      { return filepath.Join(sb.dir, "snap") }
 func (sb *sandbox) wsPath() string       { return filepath.Join(sb.snapDir(), "ws.json") }
 func (sb *sandbox) layerID(n int) string { return "p" + strconv.Itoa(n) }
@@ -169,27 +138,27 @@ func (a *Agent) pushL1(ctx context.Context, sb *sandbox, m *memsnap.Manifest, la
 	if _, err := (chunkstore.Copier{Src: a.localStore, Dst: a.l1}).Copy(ctx, hashes); err != nil {
 		return err
 	}
-	if err := a.putFile(ctx, keyLayer(sb.id, layerID), filepath.Join(sb.snapDir(), "layer-"+layerID+".json")); err != nil {
+	if err := a.putFile(ctx, KeyLayer(sb.id, layerID), filepath.Join(sb.snapDir(), "layer-"+layerID+".json")); err != nil {
 		return err
 	}
-	if err := a.putFile(ctx, keySnapfile(sb.id, layerID), sb.snapfile(layerID)); err != nil {
+	if err := a.putFile(ctx, KeySnapfile(sb.id, layerID), sb.snapfile(layerID)); err != nil {
 		return err
 	}
 	hasWS := false
 	if _, err := os.Stat(sb.wsPath()); err == nil {
 		hasWS = true
-		if err := a.putFile(ctx, keyWS(sb.id), sb.wsPath()); err != nil {
+		if err := a.putFile(ctx, KeyWS(sb.id), sb.wsPath()); err != nil {
 			return err
 		}
 	}
 	if repl, ok := a.cfg.Storage.(storage.Replicator); ok {
-		if err := a.putStream(ctx, keyDiskDelta(sb.id, layerID), func(w io.Writer) error {
+		if err := a.putStream(ctx, KeyDiskDelta(sb.id, layerID), func(w io.Writer) error {
 			return repl.SendSnapshotDelta(ctx, sb.id, prevDisk, layerID, w)
 		}); err != nil {
 			return err
 		}
 	}
-	desc := snapshotDescriptor{
+	desc := SnapshotDescriptor{
 		FormatVersion: 1,
 		SandboxID:     sb.id,
 		TemplateID:    sb.templateID,
@@ -209,7 +178,7 @@ func (a *Agent) pushL1(ctx context.Context, sb *sandbox, m *memsnap.Manifest, la
 	if err != nil {
 		return err
 	}
-	return a.l1.PutObject(ctx, keySnapshotJSON(sb.id), bytes.NewReader(data), int64(len(data)))
+	return a.l1.PutObject(ctx, KeySnapshotJSON(sb.id), bytes.NewReader(data), int64(len(data)))
 }
 
 // pushTemplateL1 publishes the template dataset stream once (GUID lineage:
@@ -219,7 +188,7 @@ func (a *Agent) pushTemplateL1(ctx context.Context, templateID string) error {
 	if !ok || a.l1 == nil {
 		return nil
 	}
-	key := keyTemplateStream(templateID)
+	key := KeyTemplateStream(templateID)
 	if ok, err := a.l1.HasObject(ctx, key); err != nil || ok {
 		return err
 	}
@@ -246,8 +215,8 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: requires restore_mode=chunked", sandboxID)
 	}
 
-	var desc snapshotDescriptor
-	if err := getJSONFrom(ctx, src, keySnapshotJSON(sandboxID), &desc); err != nil {
+	var desc SnapshotDescriptor
+	if err := getJSONFrom(ctx, src, KeySnapshotJSON(sandboxID), &desc); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: descriptor: %w", sandboxID, err)
 	}
 	if desc.FormatVersion != 1 || len(desc.Layers) == 0 {
@@ -263,13 +232,13 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 
 	// Template lineage always ships via L1 (templates are node-global and
 	// never archived); the disk delta chain comes from the tier store.
-	if err := a.receiveObject(ctx, keyTemplateStream(desc.TemplateID), func(r io.Reader) error {
+	if err := a.receiveObject(ctx, KeyTemplateStream(desc.TemplateID), func(r io.Reader) error {
 		return repl.ReceiveTemplate(ctx, desc.TemplateID, r)
 	}); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: template: %w", sandboxID, err)
 	}
 	for _, layer := range diskLayers {
-		rc, err := src.GetObject(ctx, keyDiskDelta(sandboxID, layer))
+		rc, err := src.GetObject(ctx, KeyDiskDelta(sandboxID, layer))
 		if err != nil {
 			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: disk %s: %w", sandboxID, layer, err)
 		}
@@ -311,7 +280,7 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 	}
 	for _, layer := range desc.Layers {
 		local := filepath.Join(sb.snapDir(), "layer-"+layer+".json")
-		if err := a.fetchFileFrom(ctx, src, keyLayer(sandboxID, layer), local); err != nil {
+		if err := a.fetchFileFrom(ctx, src, KeyLayer(sandboxID, layer), local); err != nil {
 			return nodeapi.SandboxStatus{}, err
 		}
 		m, err := memsnap.ReadManifest(local)
@@ -321,11 +290,11 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		sb.layers = append(sb.layers, m)
 	}
 	last := desc.Layers[len(desc.Layers)-1]
-	if err := a.fetchFileFrom(ctx, src, keySnapfile(sandboxID, last), sb.snapfile(last)); err != nil {
+	if err := a.fetchFileFrom(ctx, src, KeySnapfile(sandboxID, last), sb.snapfile(last)); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
 	if desc.HasWS {
-		if err := a.fetchFileFrom(ctx, src, keyWS(sandboxID), sb.wsPath()); err != nil {
+		if err := a.fetchFileFrom(ctx, src, KeyWS(sandboxID), sb.wsPath()); err != nil {
 			return nodeapi.SandboxStatus{}, err
 		}
 	}

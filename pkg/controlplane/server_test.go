@@ -27,6 +27,7 @@ func (m *cpMockAgent) RestoreSandbox(_ context.Context, id, _ string) (nodeapi.S
 	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING"}, nil
 }
 func (m *cpMockAgent) ExtractArtifacts(context.Context, string, []string) error { return nil }
+func (m *cpMockAgent) Prewarm(context.Context, string, string) error            { return nil }
 func (m *cpMockAgent) CreateSandbox(_ context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
 	if m.createErr != nil {
 		return nodeapi.SandboxStatus{}, m.createErr
@@ -67,7 +68,7 @@ func newTestServer(t *testing.T, agent nodeapi.Agent) http.Handler {
 		"tok":  {Owner: "alice", MaxSandboxes: 2},
 		"tok2": {Owner: "bob", MaxSandboxes: 2},
 	})
-	return NewServer(store, agent, tokens).Handler()
+	return NewServer(store, agent, tokens, nil, nil).Handler()
 }
 
 // callAs issues a request authenticated as the given bearer token.

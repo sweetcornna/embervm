@@ -53,6 +53,7 @@ func (m *mockAgent) RestoreSandbox(_ context.Context, id, tier string) (SandboxS
 func (m *mockAgent) ExtractArtifacts(_ context.Context, id string, paths []string) error {
 	return nil
 }
+func (m *mockAgent) Prewarm(_ context.Context, id, tier string) error { return nil }
 
 func (m *mockAgent) Exec(_ context.Context, id string, req *guestapi.ExecRequest) (*guestapi.ExecResponse, error) {
 	m.lastExec = req

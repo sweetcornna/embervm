@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/controlplane"
 	"github.com/embervm/embervm/pkg/netns"
 	"github.com/embervm/embervm/pkg/nodeagent"
@@ -123,7 +124,22 @@ func runDev(args []string) {
 			controlplane.DevTokenName)
 	}
 
-	srv := controlplane.NewServer(store, agent, tokens)
+	l1, _, err := chunkstore.L1FromEnv()
+	if err != nil {
+		log.Fatalf("L1 store: %v", err)
+	}
+	cold, _, err := chunkstore.ColdFromEnv()
+	if err != nil {
+		log.Fatalf("cold store: %v", err)
+	}
+	engCfg, err := controlplane.EngineConfigFromEnv()
+	if err != nil {
+		log.Fatalf("lifecycle engine config: %v", err)
+	}
+	engine := controlplane.NewEngine(store, agent, l1, cold, engCfg)
+	go engine.Run(ctx)
+
+	srv := controlplane.NewServer(store, agent, tokens, l1, cold)
 	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler()}
 
 	sigc := make(chan os.Signal, 1)

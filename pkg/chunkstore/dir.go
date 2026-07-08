@@ -151,6 +151,20 @@ func (d *Dir) GetObject(ctx context.Context, key string) (io.ReadCloser, error) 
 	return f, err
 }
 
+func (d *Dir) DeleteObject(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := d.objectPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (d *Dir) HasObject(ctx context.Context, key string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err

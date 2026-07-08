@@ -34,6 +34,8 @@ type Objects interface {
 	PutObject(ctx context.Context, key string, r io.Reader, size int64) error
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 	HasObject(ctx context.Context, key string) (bool, error)
+	// DeleteObject removes a named blob; deleting an absent key succeeds.
+	DeleteObject(ctx context.Context, key string) error
 }
 
 // Backend is what both the local dir and S3 implementations provide.
