@@ -8,6 +8,42 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+## [v0.5.0-m5] — 2026-07-09 — Agent-native fork/branch/rollback (M5) — **v0.2**
+
+Sandboxes stop being single timelines: checkpoint a live sandbox, fork N
+parallel branches from any checkpoint (tree-of-thought fan-out, RL
+rollouts), roll back to any checkpoint, and auto-checkpoint every exec
+step for time-travel replay. Decisions:
+[ADR-0006](docs/adr/0006-m5-fork-branch.md).
+
+### Added
+
+- **Checkpoints** — `POST /v0/sandboxes/{id}/checkpoints {"tag"?}` names
+  what every chunked pause already produces (memory layer + ZFS snapshot);
+  `GET` lists the timeline (PG `checkpoints` table, migration 0005).
+- **Fork** — `POST /v0/sandboxes/{id}/fork {"checkpoint"?}` branches a new
+  quota-counted sandbox from a parent checkpoint without touching the
+  parent: ZFS clone (disk CoW) + shared content-addressed chunks (memory
+  CoW) + chunked hot resume (~fork = golden fast-create, which is now a
+  thin wrapper over the same path). Omitted checkpoint = branch-now.
+  Children carry `parent_id`/`forked_from`; same-node placement.
+- **Rollback** — `POST /v0/sandboxes/{id}/rollback {"checkpoint"}`
+  switches the sandbox back in place (`zfs rollback -r` + chain trim +
+  the same hot resume the tiers use). Discards everything after the
+  target including newer checkpoints; 409 while those have live forks.
+- **Time-travel** — exec accepts `"checkpoint": true` (snapshot BEFORE
+  the command; tag in the response); forking a step's tag replays it.
+- **Lineage guards** — DELETE of a forked parent is 409 until children
+  die; the TTL engine keeps fork parents HOT (children are ZFS clones of
+  their snapshots); guest entropy reseeds per branch (VMGenID + resumed
+  hook).
+- **e2e-m5 workflow** — THE exit gate `TestFork10Branches` (10 parallel
+  branches, parent's background counter never stalls), rollback and
+  time-travel gates, node-verb gates.
+- nodeapi verbs `Fork`/`Rollback`; `storage.Rollbacker`; metrics: fork
+  under `embervm_create_seconds{path="fork"}`, rollback under
+  `embervm_restore_seconds{tier="rollback"}`.
+
 ## [v0.4.0-m4] — 2026-07-09 — Elasticity & production hardening (M4) — **the open-source v0.1 release**
 
 One node became a 3-node cluster you can lose a worker from: multi-node

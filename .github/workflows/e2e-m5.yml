@@ -1,0 +1,148 @@
+name: e2e-m5
+
+# M5 exit-criteria gates (docs/zh/03 §3): 单沙箱 fork 出 10 分支并行执行,
+# 父实例不停顿; rollback 层切换; time-travel 每步自动快照 + 任意步 fork 重放.
+# Full-stack: REST + PG + jailed/chunked agent + ZFS + L1. Latencies are
+# CI-relative per docs/adr/0001.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  exit-criteria:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FC_VERSION: v1.16.1
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: embervm
+          POSTGRES_PASSWORD: embervm
+          POSTGRES_DB: embervm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle || true
+          for _ in $(seq 1 30); do test -w /dev/kvm && break; sleep 1; done
+          test -w /dev/kvm
+
+      - name: Enable unprivileged userfaultfd
+        run: sudo sysctl -w vm.unprivileged_userfaultfd=1
+
+      - name: Install dependencies (zfs userland is NOT preinstalled)
+        run: sudo apt-get update && sudo apt-get install -y jq e2fsprogs zfsutils-linux
+
+      - name: Free runner disk space
+        run: bash scripts/ci-free-disk.sh
+
+      - name: Create loopback ZFS pool
+        run: |
+          truncate -s 12G /var/tmp/embervm-m5.img
+          sudo zpool create -f embervm-m5 /var/tmp/embervm-m5.img
+          sudo zfs list embervm-m5
+
+      - name: Start MinIO (warm L1 bucket)
+        run: |
+          curl -fsSL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+          sudo install -m 0755 /tmp/minio /usr/local/bin/minio
+          curl -fsSL -o /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          sudo install -m 0755 /tmp/mc /usr/local/bin/mc
+          mkdir -p /tmp/minio-data
+          MINIO_ROOT_USER=embervm-ci MINIO_ROOT_PASSWORD=embervm-ci-secret \
+            nohup minio server /tmp/minio-data --address 127.0.0.1:9000 >/tmp/minio.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+          curl -sf http://127.0.0.1:9000/minio/health/live
+          mc alias set l1 http://127.0.0.1:9000 embervm-ci embervm-ci-secret
+          mc mb l1/embervm-warm
+
+      - name: Cache assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          key: assets-v1.16.1-${{ hashFiles('scripts/assets.sha256') }}
+
+      - name: Build host binaries
+        run: make build
+
+      - name: Fetch assets
+        run: sudo -E env "PATH=$PATH" FC_VERSION=v1.16.1 bash scripts/fetch-assets.sh
+
+      - name: Node verbs — fork sees checkpoint state, rollback switches layers
+        env:
+          EMBERVM_KVM_TESTS: "1"
+          EMBERVM_KERNEL: ${{ github.workspace }}/assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_JAILER_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/jailer-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: ${{ github.workspace }}/bin/uffd-handler
+          EMBERVM_GUESTD_BIN: ${{ github.workspace }}/bin/guestd
+          EMBERVM_SCRIPT_DIR: ${{ github.workspace }}/scripts
+          EMBERVM_ZFS_POOL: embervm-m5
+          EMBERVM_L1_ENDPOINT: 127.0.0.1:9000
+          EMBERVM_L1_BUCKET: embervm-warm
+          EMBERVM_L1_ACCESS_KEY: embervm-ci
+          EMBERVM_L1_SECRET_KEY: embervm-ci-secret
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" \
+            go test ./pkg/nodeagent/ -run 'TestForkKVM|TestRollbackKVM' -v -count=1 -timeout 20m \
+            | tee /tmp/m5-verbs.log
+          for t in TestForkKVM TestRollbackKVM; do
+            grep -q -- "--- PASS: $t" /tmp/m5-verbs.log \
+              || { echo "::error::$t did not PASS (skipped?)"; exit 1; }
+          done
+
+      - name: M5 exit gates — fork-10 parallel (parent never stalls), rollback, time-travel
+        env:
+          EMBERVM_KVM_TESTS: "1"
+          EMBERVM_KERNEL: ${{ github.workspace }}/assets/vmlinux-6.1.155
+          EMBERVM_FC_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/firecracker-v1.16.1-x86_64
+          EMBERVM_JAILER_BIN: ${{ github.workspace }}/assets/release-v1.16.1-x86_64/jailer-v1.16.1-x86_64
+          EMBERVM_UFFD_BIN: ${{ github.workspace }}/bin/uffd-handler
+          EMBERVM_GUESTD_BIN: ${{ github.workspace }}/bin/guestd
+          EMBERVM_SCRIPT_DIR: ${{ github.workspace }}/scripts
+          EMBERVM_ZFS_POOL: embervm-m5
+          EMBERVM_L1_ENDPOINT: 127.0.0.1:9000
+          EMBERVM_L1_BUCKET: embervm-warm
+          EMBERVM_L1_ACCESS_KEY: embervm-ci
+          EMBERVM_L1_SECRET_KEY: embervm-ci-secret
+          EMBERVM_PG_TESTS: "1"
+          EMBERVM_TEST_DATABASE_URL: postgres://embervm:embervm@localhost:5432/embervm?sslmode=disable
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" \
+            go test ./pkg/nodeagent/ -run 'TestFork10Branches|TestRollbackCheckpoint|TestTimeTravelReplay' -v -count=1 -timeout 30m \
+            | tee /tmp/m5-exit.log
+          for t in TestFork10Branches TestRollbackCheckpoint TestTimeTravelReplay; do
+            grep -q -- "--- PASS: $t" /tmp/m5-exit.log \
+              || { echo "::error::$t did not PASS (skipped?)"; exit 1; }
+          done
+
+      - name: Report measured numbers
+        if: always()
+        run: |
+          grep -E "checkpoint .* in |10 forks in|branches parallel-verified|never stalled|rollback to interactive|time-travel verified|fork verified|rollback verified" /tmp/m5-verbs.log /tmp/m5-exit.log 2>/dev/null || true
+
+      - name: Upload logs on failure
+        if: failure()
+        run: sudo chmod -R a+rX /tmp 2>/dev/null || true
