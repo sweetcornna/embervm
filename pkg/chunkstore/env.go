@@ -24,7 +24,9 @@ func ColdFromEnv() (ListingBackend, bool, error) {
 
 func backendFromEnv(prefix string) (ListingBackend, bool, error) {
 	if dir := os.Getenv(prefix + "DIR"); dir != "" {
-		b, err := NewDir(dir)
+		// L1/cold is the write-through RPO target: writes must survive
+		// power loss, so this Dir fsyncs (the node-local cache does not).
+		b, err := NewDurableDir(dir)
 		if err != nil {
 			return nil, false, err
 		}

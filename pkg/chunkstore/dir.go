@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
@@ -16,7 +17,8 @@ func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 // blobs under meta/<key>. Writes are tmp+rename so concurrent writers of
 // the same chunk are safe (identical content, last rename wins).
 type Dir struct {
-	root string
+	root    string
+	durable bool // fsync file + parent dir on every write
 }
 
 func NewDir(root string) (*Dir, error) {
@@ -26,6 +28,21 @@ func NewDir(root string) (*Dir, error) {
 		}
 	}
 	return &Dir{root: root}, nil
+}
+
+// NewDurableDir is a Dir that fsyncs the file and its parent directory on
+// every write, so a rename cannot outlive its data across power loss (a
+// valid-named but empty chunk would surface as a restore-time hash
+// mismatch). Use it for L1/cold roles — the write-through RPO target;
+// the node-local cache keeps the fast path since its contents are
+// re-fetchable.
+func NewDurableDir(root string) (*Dir, error) {
+	d, err := NewDir(root)
+	if err != nil {
+		return nil, err
+	}
+	d.durable = true
+	return d, nil
 }
 
 func (d *Dir) chunkPath(hash string) (string, error) {
@@ -42,7 +59,7 @@ func (d *Dir) objectPath(key string) (string, error) {
 	return filepath.Join(d.root, "meta", filepath.FromSlash(key)), nil
 }
 
-func writeAtomic(path string, r io.Reader, size int64) error {
+func writeAtomic(path string, r io.Reader, size int64, durable bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -52,6 +69,9 @@ func writeAtomic(path string, r io.Reader, size int64) error {
 	}
 	defer os.Remove(tmp.Name())
 	n, err := io.Copy(tmp, r)
+	if err == nil && durable {
+		err = tmp.Sync()
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
@@ -61,7 +81,26 @@ func writeAtomic(path string, r io.Reader, size int64) error {
 	if size >= 0 && n != size {
 		return fmt.Errorf("chunkstore: wrote %d bytes, expected %d", n, size)
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	if durable {
+		return syncDir(filepath.Dir(path))
+	}
+	return nil
+}
+
+// syncDir fsyncs a directory so a completed rename survives power loss.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 func (d *Dir) Put(ctx context.Context, hash string, r io.Reader, size int64) (bool, error) {
@@ -75,10 +114,45 @@ func (d *Dir) Put(ctx context.Context, hash string, r io.Reader, size int64) (bo
 	if _, err := os.Stat(path); err == nil {
 		return false, nil // dedup
 	}
-	if err := writeAtomic(path, r, size); err != nil {
+	if err := writeAtomic(path, r, size, d.durable); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// TouchChunk refreshes a chunk's modification time — its GC clock. The
+// pause write-through touches dedup hits so the GC grace window covers
+// chunks a new manifest re-references, not only chunks it uploads (the
+// gc.go safety argument).
+func (d *Dir) TouchChunk(ctx context.Context, hash string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := d.chunkPath(hash)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	return os.Chtimes(path, now, now)
+}
+
+// StatChunk returns a chunk's current ChunkInfo — GC's delete-time re-check.
+func (d *Dir) StatChunk(ctx context.Context, hash string) (ChunkInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return ChunkInfo{}, err
+	}
+	path, err := d.chunkPath(hash)
+	if err != nil {
+		return ChunkInfo{}, err
+	}
+	fi, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return ChunkInfo{}, fmt.Errorf("chunk %s: %w", hash, ErrNotFound)
+	}
+	if err != nil {
+		return ChunkInfo{}, err
+	}
+	return ChunkInfo{Hash: hash, ModTime: fi.ModTime()}, nil
 }
 
 func (d *Dir) Get(ctx context.Context, hash string) (io.ReadCloser, error) {
@@ -133,7 +207,7 @@ func (d *Dir) PutObject(ctx context.Context, key string, r io.Reader, size int64
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, r, size)
+	return writeAtomic(path, r, size, d.durable)
 }
 
 func (d *Dir) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {

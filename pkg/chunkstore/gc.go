@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -31,9 +32,12 @@ type layerRefs struct {
 // GC deletes chunks no layer manifest references (mark-and-sweep over one
 // backend). Roots are every `sandboxes/*/layer-*.json` object. Safety: the
 // manifests are listed BEFORE the chunks, and unreferenced chunks younger
-// than grace survive the sweep — an in-flight pause uploads chunks before
-// its manifest, and the grace window keeps that ordering safe. Run it after
-// RECYCLED transitions (the engine does) or standalone.
+// than grace survive the sweep. An in-flight pause uploads chunks before
+// its manifest, and every chunk it merely re-references (dedup hit) gets
+// its mtime refreshed by the Copier — so the grace window covers BOTH the
+// fresh uploads and the re-references. Because the touch can land after
+// ListChunks, each sweep candidate is re-stat'ed at delete time. Run it
+// after RECYCLED transitions (the engine does) or standalone.
 func GC(ctx context.Context, b ListingBackend, grace time.Duration) (GCResult, error) {
 	var res GCResult
 	keys, err := b.ListObjectKeys(ctx, "sandboxes/")
@@ -47,6 +51,12 @@ func GC(ctx context.Context, b ListingBackend, grace time.Duration) (GCResult, e
 			continue
 		}
 		if err := markManifest(ctx, b, key, live); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				// Recycled between list and read: its references die with
+				// it. Aborting the pass here would let garbage pile up on
+				// any store with churn.
+				continue
+			}
 			return res, err
 		}
 		res.Manifests++
@@ -57,6 +67,7 @@ func GC(ctx context.Context, b ListingBackend, grace time.Duration) (GCResult, e
 	if err != nil {
 		return res, fmt.Errorf("gc: list chunks: %w", err)
 	}
+	stater, canStat := b.(ChunkStater)
 	cutoff := time.Now().Add(-grace)
 	for _, c := range chunks {
 		if live[c.Hash] {
@@ -65,6 +76,22 @@ func GC(ctx context.Context, b ListingBackend, grace time.Duration) (GCResult, e
 		if c.ModTime.After(cutoff) {
 			res.SkippedNew++
 			continue
+		}
+		if canStat {
+			// The listing's mtime is stale by construction; a pause's
+			// dedup touch may have refreshed this chunk since. Only the
+			// current mtime is authoritative for a destructive decision.
+			cur, err := stater.StatChunk(ctx, c.Hash)
+			if errors.Is(err, ErrNotFound) {
+				continue // already gone
+			}
+			if err != nil {
+				return res, fmt.Errorf("gc: recheck %s: %w", c.Hash, err)
+			}
+			if cur.ModTime.After(cutoff) {
+				res.SkippedNew++
+				continue
+			}
 		}
 		if err := b.Delete(ctx, c.Hash); err != nil {
 			return res, fmt.Errorf("gc: sweep %s: %w", c.Hash, err)

@@ -40,6 +40,16 @@ func (c Copier) Copy(ctx context.Context, hashes []string) (int, error) {
 				return err
 			}
 			if ok {
+				// A dedup hit re-references an existing chunk whose mtime
+				// may be ancient, and the manifest that will reference it
+				// lands only after Copy returns. Refresh the chunk's GC
+				// clock or a concurrent sweep could delete it before the
+				// manifest becomes a mark root (gc.go safety argument).
+				if toucher, can := c.Dst.(Toucher); can {
+					if err := toucher.TouchChunk(ctx, hash); err != nil {
+						return fmt.Errorf("touch chunk %s: %w", hash, err)
+					}
+				}
 				return nil
 			}
 			rc, err := c.Src.Get(ctx, hash)

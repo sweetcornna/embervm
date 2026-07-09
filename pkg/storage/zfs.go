@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -95,12 +96,15 @@ func (b *ZFSBackend) EnsureTemplate(ctx context.Context, templateID, rootfsExt4S
 	if b.datasetExists(ctx, ds+"@final") {
 		return nil // already imported and cloneable
 	}
+	// Concurrent first imports race every probe here (same class as
+	// ensureParent): losers must treat "dataset already exists" as the
+	// success it is, on the create and on the @final snapshot alike.
 	if !b.datasetExists(ctx, ds) {
 		if _, err := b.run(ctx, "zfs", "create", "-p",
 			"-o", "recordsize=16k",
 			"-o", "primarycache=metadata",
 			"-o", "compression=lz4",
-			ds); err != nil {
+			ds); err != nil && !strings.Contains(err.Error(), "dataset already exists") {
 			return err
 		}
 	}
@@ -108,10 +112,24 @@ func (b *ZFSBackend) EnsureTemplate(ctx context.Context, templateID, rootfsExt4S
 	if err != nil {
 		return err
 	}
-	if err := copyFile(filepath.Join(mp, "rootfs.ext4"), rootfsExt4Src, 0o644); err != nil {
+	// Stage + rename so a concurrent importer can never snapshot a
+	// half-copied rootfs — both writers carry identical bytes, so whichever
+	// complete file @final captures is equally correct.
+	tmpf, err := os.CreateTemp(mp, ".rootfs.ext4.tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := tmpf.Name()
+	tmpf.Close()
+	defer os.Remove(tmp)
+	if err := copyFile(tmp, rootfsExt4Src, 0o644); err != nil {
 		return fmt.Errorf("place template rootfs: %w", err)
 	}
-	if _, err := b.run(ctx, "zfs", "snapshot", ds+"@final"); err != nil {
+	if err := os.Rename(tmp, filepath.Join(mp, "rootfs.ext4")); err != nil {
+		return err
+	}
+	if _, err := b.run(ctx, "zfs", "snapshot", ds+"@final"); err != nil &&
+		!strings.Contains(err.Error(), "dataset already exists") {
 		return err
 	}
 	return nil

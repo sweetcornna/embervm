@@ -53,10 +53,26 @@ func (b *PlainBackend) EnsureTemplate(_ context.Context, templateID, rootfsExt4S
 		return err
 	}
 	dst := b.templateRootfs(templateID)
+	if _, err := os.Stat(dst); err == nil {
+		return nil // already imported; never rewrite a live template in place
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	return copyFile(dst, rootfsExt4Src, 0o644)
+	// Stage + rename: a concurrent CloneSandbox reading dst must never see
+	// a half-copied rootfs (concurrent imports carry identical bytes, so
+	// whichever rename lands is correct).
+	tmpf, err := os.CreateTemp(filepath.Dir(dst), ".rootfs-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := tmpf.Name()
+	tmpf.Close()
+	defer os.Remove(tmp)
+	if err := copyFile(tmp, rootfsExt4Src, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // CloneSandbox implements Backend.

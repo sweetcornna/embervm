@@ -27,6 +27,20 @@ type Store interface {
 	Delete(ctx context.Context, hash string) error
 }
 
+// Toucher refreshes a chunk's GC clock without rewriting its bytes. The
+// pause write-through (Copier) touches dedup hits so the GC grace window
+// protects chunks a new manifest re-references, not only chunks it uploads.
+type Toucher interface {
+	TouchChunk(ctx context.Context, hash string) error
+}
+
+// ChunkStater re-reads a single chunk's ChunkInfo. GC re-checks every sweep
+// candidate at delete time so a touch that landed after ListChunks still
+// saves the chunk.
+type ChunkStater interface {
+	StatChunk(ctx context.Context, hash string) (ChunkInfo, error)
+}
+
 // Objects stores named (non-content-addressed) blobs: layer manifests,
 // Firecracker snapfiles, WS traces, zfs send streams. Keys are
 // caller-scoped paths like "sandboxes/<id>/layer-p1.json".
