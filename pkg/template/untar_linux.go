@@ -18,25 +18,21 @@ func lchownAsRoot(target string, uid, gid int) error {
 	return os.Lchown(target, uid, gid)
 }
 
-// makeDevice creates char/block/fifo nodes when running as root and skips
-// them otherwise (docker-exported images rarely carry any; /dev is a
-// devtmpfs mounted by guestd at boot).
+// makeDevice materializes FIFO entries (root only, matching ownership
+// handling). Char/block device entries are deliberately NOT created:
+// extraction runs as root on the HOST filesystem, so a malicious image
+// entry ("c 1 1" → /dev/mem, or a block node aliasing a host disk) would
+// put a real, openable device node in the staging tree. The guest never
+// needs them — /dev is a devtmpfs mounted by guestd at boot.
 func makeDevice(target string, hdr *tar.Header) error {
-	if os.Geteuid() != 0 {
+	if hdr.Typeflag != tar.TypeFifo {
 		return nil
 	}
-	mode := uint32(hdr.Mode & 0o7777)
-	switch hdr.Typeflag {
-	case tar.TypeChar:
-		mode |= unix.S_IFCHR
-	case tar.TypeBlock:
-		mode |= unix.S_IFBLK
-	case tar.TypeFifo:
-		mode |= unix.S_IFIFO
+	if os.Geteuid() != 0 {
+		return nil
 	}
 	if err := removeIfExists(target); err != nil {
 		return err
 	}
-	dev := unix.Mkdev(uint32(hdr.Devmajor), uint32(hdr.Devminor))
-	return unix.Mknod(target, mode, int(dev))
+	return unix.Mknod(target, unix.S_IFIFO|uint32(hdr.Mode&0o7777), 0)
 }

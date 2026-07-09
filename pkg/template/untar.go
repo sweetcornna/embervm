@@ -17,6 +17,11 @@ import (
 	securejoin "github.com/cyphar/filepath-securejoin"
 )
 
+// maxUntarBytes caps the cumulative extracted size of one image filesystem
+// (generous: real rootfs images are single-digit GiB). A var so tests can
+// exercise the cap without a 16 GiB fixture.
+var maxUntarBytes int64 = 16 << 30
+
 // safeTarget resolves the on-disk path for a tar entry name, scoped to dst.
 // The PARENT directory chain is resolved with SecureJoin (following existing
 // symlinks but clamping any escape back inside dst); the final component is
@@ -58,6 +63,7 @@ func Untar(dst string, r io.Reader) error {
 		mode fs.FileMode
 	}
 	var dirModes []dirMode
+	var extracted int64
 
 	for {
 		hdr, err := tr.Next()
@@ -66,6 +72,13 @@ func Untar(dst string, r io.Reader) error {
 		}
 		if err != nil {
 			return fmt.Errorf("read tar: %w", err)
+		}
+		// Cumulative size cap: image content is attacker-supplied and a tiny
+		// compressed layer can expand enormously, filling the host work dir.
+		// hdr.Size is authoritative — tar.Reader hands out at most Size
+		// bytes per entry.
+		if extracted += hdr.Size; extracted > maxUntarBytes {
+			return fmt.Errorf("tar expands past %d bytes: refusing (decompression bomb?)", maxUntarBytes)
 		}
 
 		// Reject obviously-hostile entry names early for a clear error;

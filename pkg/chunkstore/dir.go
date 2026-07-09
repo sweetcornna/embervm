@@ -78,6 +78,8 @@ func writeAtomic(path string, r io.Reader, size int64, durable bool) error {
 	if err != nil {
 		return err
 	}
+	// size < 0 means "unknown, stream to EOF" (pipes): the length check is
+	// then unavailable and truncation detection falls to the reader side.
 	if size >= 0 && n != size {
 		return fmt.Errorf("chunkstore: wrote %d bytes, expected %d", n, size)
 	}

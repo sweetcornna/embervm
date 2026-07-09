@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/embervm/embervm/pkg/guestapi"
 	"github.com/embervm/embervm/pkg/guestd"
@@ -50,7 +51,16 @@ func main() {
 	}
 
 	fmt.Printf("guestd listening addr=%s pid=%d version=%s\n", *addr, os.Getpid(), version)
-	err := http.ListenAndServe(*addr, guestd.NewServer(guestd.Options{Version: version}))
+	srv := &http.Server{
+		Addr:    *addr,
+		Handler: guestd.NewServer(guestd.Options{Version: version}),
+		// The only client is the host agent, but a PID-1 daemon's port must
+		// not be pinnable by a stuck connection. Header-level bounds only:
+		// exec responses legitimately take as long as the command runs.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       5 * time.Minute,
+	}
+	err := srv.ListenAndServe()
 	fmt.Fprintf(os.Stderr, "guestd: serve: %v\n", err)
 	os.Exit(1)
 }

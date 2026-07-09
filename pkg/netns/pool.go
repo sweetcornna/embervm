@@ -65,6 +65,10 @@ func NewPoolAt(scriptDir string, base, size int) *Pool {
 func (p *Pool) Setup(ctx context.Context) error {
 	p.mu.Lock()
 	p.free = p.free[:0]
+	// Leased slots are forgotten too: a re-Setup recreates every namespace,
+	// so a stale lease's slot listed as both used and free would be handed
+	// out twice.
+	p.used = map[int]bool{}
 	p.mu.Unlock()
 	script := filepath.Join(p.scriptDir, "setup-network.sh")
 	for id := p.base; id < p.base+p.size; id++ {

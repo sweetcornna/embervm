@@ -41,9 +41,14 @@ func (b *limitedBuf) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// maxExecBody bounds one exec request (the JSON envelope plus base64
+// stdin): the whole body is decoded into guest memory, and guest memory is
+// the scarcest resource here.
+const maxExecBody = 32 << 20
+
 func (s *server) handleExec(w http.ResponseWriter, r *http.Request) {
 	var req guestapi.ExecRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxExecBody)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

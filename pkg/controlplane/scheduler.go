@@ -19,7 +19,9 @@ var ErrNoCapacity = errors.New("no node with free capacity")
 
 // Registry maps node ids to their agents (static membership in M4 — a
 // config-listed set of unix sockets; dynamic join is future work). The
-// sandbox row's node_id IS the routing table (no Redis, ADR-0005).
+// sandbox row's node_id IS the routing table (no Redis, ADR-0005). The
+// mutex is idle today (the map is written only in NewRegistry) and exists
+// for the dynamic-join future; do not rely on it elsewhere.
 type Registry struct {
 	mu     sync.RWMutex
 	agents map[string]nodeapi.Agent

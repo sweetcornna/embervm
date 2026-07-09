@@ -87,6 +87,9 @@ const resumeHookPath = "/etc/embervm/resume-hook"
 // hook exists for userspace concerns.
 func (s *server) handleResumed(w http.ResponseWriter, r *http.Request) {
 	n := s.resumes.Add(1)
+	// HookRan means the hook was found and STARTED — it runs async with a
+	// 5s bound and only logs its own failures; "ran to completion
+	// successfully" is not part of the wire contract.
 	hookRan := false
 	if st, err := os.Stat(resumeHookPath); err == nil && st.Mode()&0o111 != 0 {
 		hookRan = true
@@ -139,7 +142,11 @@ func (s *server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
-	_, _ = io.Copy(w, f)
+	// Exactly the advertised length: a file growing between Stat and here
+	// would otherwise overrun Content-Length and corrupt the response
+	// framing (a shrinking file still truncates — the client sees the
+	// mismatch and errors, which is the honest outcome).
+	_, _ = io.CopyN(w, f, fi.Size())
 }
 
 func (s *server) handleWriteFile(w http.ResponseWriter, r *http.Request) {

@@ -154,7 +154,9 @@ func chunkedInputs(manifestDir, storeDir string) (*memsnap.View, uffd.ChunkGette
 // watchParent stops the handler when the supervising process disappears
 // (getppid changes once we are reparented to init/subreaper).
 func watchParent(pid int, stop func()) {
-	for range time.Tick(2 * time.Second) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for range t.C {
 		if os.Getppid() != pid {
 			log.Printf("parent %d is gone, shutting down", pid)
 			stop()
