@@ -468,7 +468,10 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (nodeapi.SandboxSt
 		load.SnapshotPath = a.fcSnapPath(sb, "snapfile-"+sb.snapLayer)
 		load.MemBackend.BackendPath = a.fcSnapPath(sb, "uffd.sock")
 		load.TrackDirtyPages = true // keep Diff pauses possible after restore
-		load.ClockRealtime = true   // 校时: re-arm the guest realtime clock
+		// 校时: re-arm the guest realtime clock. Firecracker rejects the
+		// flag on aarch64 ("clock_realtime is not supported"); those guests
+		// re-sync via the guestd resume hook instead.
+		load.ClockRealtime = runtime.GOARCH == "amd64"
 	}
 	if err := c.LoadSnapshot(ctx, load); err != nil {
 		return nodeapi.SandboxStatus{}, err
