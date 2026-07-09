@@ -101,6 +101,10 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 	if err != nil {
 		return fmt.Errorf("chunkify %s: %w", layerID, err)
 	}
+	// Layer-file mutation happens under snapMu: Fork walks and copies these
+	// files off a live parent, and the Full-reset glob+remove below would
+	// otherwise hand it a half-deleted chain.
+	sb.snapMu.Lock()
 	if snapType == "Full" {
 		// A fresh chain root: manifests from earlier epochs (e.g. the
 		// synthetic layer-cold.json a cold restore fetched) must not leak
@@ -112,8 +116,10 @@ func (a *Agent) pauseChunked(ctx context.Context, sb *sandbox) error {
 		}
 	}
 	if err := m.WriteFile(filepath.Join(snapDir, "layer-"+layerID+".json")); err != nil {
+		sb.snapMu.Unlock()
 		return err
 	}
+	sb.snapMu.Unlock()
 	_ = os.Remove(memfile)
 	if snapType == "Full" {
 		sb.layers = []*memsnap.Manifest{m} // new chain root
@@ -268,15 +274,30 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 	relDeadline := time.Now().Add(30 * time.Second)
 	for {
 		a.mu.Lock()
-		_, releasing := a.sbx[sandboxID]
+		local, present := a.sbx[sandboxID]
 		a.mu.Unlock()
-		if !releasing {
+		if !present {
+			break
+		}
+		// A FAILED local remnant (failed pause/resume/rollback kept on the
+		// books for local retry) would block this loop forever — and the
+		// control plane routes FAILED recoveries sticky-first to THIS node.
+		// Claim it and dismantle it, then restore over a clean slate.
+		if local.machine.CAS(lifecycle.StateFailed, lifecycle.StateStopping) == nil {
+			a.mu.Lock()
+			delete(a.sbx, sandboxID)
+			a.mu.Unlock()
+			a.cleanup(ctx, local)
 			break
 		}
 		if time.Now().After(relDeadline) {
 			return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: local release still in flight", sandboxID)
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nodeapi.SandboxStatus{}, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	if err := a.cfg.Storage.DestroySandbox(ctx, sandboxID); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("restore %s: clear local remnant: %w", sandboxID, err)

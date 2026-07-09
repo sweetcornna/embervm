@@ -34,10 +34,13 @@ const (
 // transitions is the legal edge set. FAILED is reachable from any active
 // (non-terminal) state and is added below rather than listed per-source.
 var transitions = map[State]map[State]bool{
-	StatePending:      {StateStarting: true},
-	StateStarting:     {StateRunning: true},
-	StateRunning:      {StatePausing: true, StateStopping: true},
-	StatePausing:      {StatePausedHot: true},
+	StatePending:  {StateStarting: true},
+	StateStarting: {StateRunning: true},
+	StateRunning:  {StatePausing: true, StateStopping: true},
+	// PAUSING→RUNNING is the aborted-pause rollback: the snapshot was never
+	// taken and Firecracker was resumed in place, so the sandbox simply is
+	// running again.
+	StatePausing:      {StatePausedHot: true, StateRunning: true},
 	StatePausedHot:    {StateResuming: true, StateStopping: true, StatePausedWarm: true},
 	StatePausedWarm:   {StateResuming: true, StateArchivedCold: true, StateStopping: true},
 	StateArchivedCold: {StateResuming: true, StateRecycled: true, StateStopping: true},

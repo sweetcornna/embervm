@@ -183,6 +183,13 @@ func (a *Agent) Fork(ctx context.Context, parentID, layer, newID string) (nodeap
 	if !a.chunked() || !a.jailed() {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("fork: requires restore_mode=chunked under the jailer")
 	}
+	// Committed layer files are immutable EXCEPT for the parent's Full-pause
+	// chain reset and a rollback trim, both of which delete them wholesale.
+	// Hold the parent's snapMu across the chain walk AND the staging-file
+	// copies inside cloneRestore so a fork never reads a half-deleted chain
+	// (the parent's next pause waits behind us instead).
+	parent.snapMu.Lock()
+	defer parent.snapMu.Unlock()
 	chain, err := chainFor(parent.snapDir(), layer)
 	if err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("fork %s: %w", parentID, err)
@@ -259,7 +266,9 @@ func (a *Agent) Rollback(ctx context.Context, sandboxID, layer string) (nodeapi.
 	}
 
 	// Trim the chain. snapCount keeps counting upward — tags stay monotone
-	// across the rollback (the standing seq/tag contract).
+	// across the rollback (the standing seq/tag contract). Layer-file
+	// removal happens under snapMu (forks read these files, see Fork).
+	sb.snapMu.Lock()
 	discarded := sb.layers[idx+1:]
 	sb.layers = sb.layers[:idx+1]
 	sb.snapLayer = layer
@@ -281,6 +290,7 @@ func (a *Agent) Rollback(ctx context.Context, sandboxID, layer string) (nodeapi.
 			_ = a.l1.DeleteObject(ctx, KeySnapfile(sb.id, m.LayerID))
 		}
 	}
+	sb.snapMu.Unlock()
 	if a.l1 != nil && len(sb.diskLayers) > 0 {
 		// Keep the L1 restore descriptor consistent with the trimmed chain:
 		// a node death between rollback and the next pause must restore the

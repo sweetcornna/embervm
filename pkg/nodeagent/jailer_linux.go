@@ -5,10 +5,12 @@ package nodeagent
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // The M4 jailer hardening (docs/zh/04 §5, the debt ADR-0002 deferred).
@@ -101,7 +103,9 @@ func (a *Agent) stageJailerExec(sb *sandbox) error {
 // kernel, and ownership. Idempotent (re-binding over an existing mount is
 // prevented by tearing down first).
 func (a *Agent) buildJail(sb *sandbox) error {
-	a.teardownJail(sb) // clean slate; stale mounts poison snapshots
+	if err := a.teardownJail(sb); err != nil { // clean slate; stale mounts poison snapshots
+		return fmt.Errorf("clean slate: %w", err)
+	}
 	if err := a.stageJailerExec(sb); err != nil {
 		return fmt.Errorf("stage jailer exec file: %w", err)
 	}
@@ -148,13 +152,71 @@ func (a *Agent) buildJail(sb *sandbox) error {
 	return nil
 }
 
-// teardownJail unmounts and removes the chroot. Safe when absent.
-func (a *Agent) teardownJail(sb *sandbox) {
+// teardownJail unmounts and removes the chroot. Safe when absent. Most
+// callers (cleanup, reap, release) ignore the error — jail litter is
+// harmless — but buildJail must not proceed over a live mount.
+func (a *Agent) teardownJail(sb *sandbox) error {
 	root := a.jailRoot(sb.id)
-	for _, m := range []string{filepath.Join(root, "snap"), filepath.Join(root, "data")} {
-		_ = exec.Command("umount", m).Run()
+	binds := []string{filepath.Join(root, "snap"), filepath.Join(root, "data")}
+	for _, m := range binds {
+		if !isMountpoint(m) {
+			continue
+		}
+		if out, err := exec.Command("umount", m).CombinedOutput(); err != nil {
+			log.Printf("nodeagent: teardown jail %s: umount %s: %v: %s", sb.id, m, err, out)
+		}
+	}
+	// RemoveAll through a still-live bind would recurse into the REAL
+	// dataset (rootfs.ext4, data.raw) and delete it — jail litter is
+	// recoverable, a deleted dataset is not. Verify before removing.
+	for _, m := range binds {
+		if isMountpoint(m) {
+			err := fmt.Errorf("teardown jail %s: %s still mounted; refusing to remove the jail dir", sb.id, m)
+			log.Printf("nodeagent: %v", err)
+			return err
+		}
 	}
 	_ = os.RemoveAll(filepath.Join(a.cfg.JailerChrootBase, "firecracker", sb.id))
+	return nil
+}
+
+// isMountpoint reports whether path is a mount target per /proc/self/mounts.
+// (A device-id comparison cannot detect a same-filesystem bind mount, which
+// is exactly what the plain backend produces.) On a read error it reports
+// true — the caller then refuses destructive action, the safe direction.
+func isMountpoint(path string) bool {
+	data, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return true
+	}
+	clean := filepath.Clean(path)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && unescapeMount(fields[1]) == clean {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeMount decodes the octal escapes /proc/self/mounts uses for
+// whitespace in paths (\040 etc.).
+func unescapeMount(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // jailerCommand builds the jailer invocation that execs Firecracker inside

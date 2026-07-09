@@ -51,6 +51,7 @@ type sandbox struct {
 	dataRaw     string
 	fc          *exec.Cmd
 	uffd        *exec.Cmd
+	snapMu      sync.Mutex // serializes layer-file mutation (Full-pause reset, rollback trim) with fork's chain read
 	snapCount   int
 	guest       *guestapi.Client
 	templateID  string
@@ -77,6 +78,16 @@ type Agent struct {
 	cold       chunkstore.Backend // optional cold-tier store (EMBERVM_COLD_*)
 	failed     []string           // watchdog-reaped ids, drained by Healthz
 	golden     map[string]goldenMeta
+
+	watchdogCancel context.CancelFunc // set when New started the watchdog
+}
+
+// Close stops the agent's background watchdog goroutine. Sandboxes are left
+// as they are — Close is for tests and orderly daemon shutdown, not teardown.
+func (a *Agent) Close() {
+	if a.watchdogCancel != nil {
+		a.watchdogCancel()
+	}
 }
 
 var _ nodeapi.Agent = (*Agent)(nil)
@@ -137,8 +148,10 @@ func New(cfg Config) (nodeapi.Agent, error) {
 		}
 	}
 	if cfg.WatchdogInterval > 0 {
-		// Process-lifetime loop, like the daemon that owns the agent.
-		a.StartWatchdog(context.Background(), cfg.WatchdogInterval)
+		// Runs for the daemon's lifetime unless Close is called.
+		wctx, cancel := context.WithCancel(context.Background())
+		a.watchdogCancel = cancel
+		a.StartWatchdog(wctx, cfg.WatchdogInterval)
 	}
 	return a, nil
 }
@@ -188,8 +201,16 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 		st, err := a.fastCreate(ctx, req, meta)
 		if err == nil {
 			metrics.CreateSeconds.WithLabelValues("fast").Observe(time.Since(createStart).Seconds())
+			return st, nil
 		}
-		return st, err
+		if ctx.Err() != nil {
+			return nodeapi.SandboxStatus{}, err
+		}
+		// Fast-create is an optimization: a runtime failure (a missing
+		// golden chunk, a clone error) must not fail the create — fall
+		// back to the cold boot below. cloneRestore already dismantled
+		// its partial sandbox.
+		log.Printf("nodeagent: fast create %s: %v; falling back to cold boot", req.SandboxID, err)
 	}
 
 	m := lifecycle.New(lifecycle.StatePending)
@@ -255,13 +276,13 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 		return nodeapi.SandboxStatus{}, fmt.Errorf("guestd did not come up: %w", err)
 	}
 	metrics.CreateSeconds.WithLabelValues("cold").Observe(time.Since(createStart).Seconds())
-	return a.statusLocked(sb), nil
+	return a.status(sb), nil
 }
 
 // launchFC starts the Firecracker process — jailed (chroot + uid/gid +
 // netns + seccomp) when a jailer is configured, plain otherwise — and
 // returns the API socket path.
-func (a *Agent) launchFC(sb *sandbox, logName string) (string, error) {
+func (a *Agent) launchFC(ctx context.Context, sb *sandbox, logName string) (string, error) {
 	apiSock := a.fcAPISock(sb)
 	// sun_path is 108 bytes on Linux. A too-long host-side path fails every
 	// connect(2) with EINVAL while Firecracker sits happily listening on the
@@ -295,7 +316,7 @@ func (a *Agent) launchFC(sb *sandbox, logName string) (string, error) {
 	sb.fc = fc
 	a.mu.Unlock()
 	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
-	if err := waitSocketReady(apiSock, 10*time.Second); err != nil {
+	if err := waitSocketReady(ctx, apiSock, 10*time.Second); err != nil {
 		return "", err
 	}
 	return apiSock, nil
@@ -312,7 +333,7 @@ func (a *Agent) fcKernelPath() string {
 // bootFresh starts a Firecracker process in the sandbox netns and drives the
 // full boot API sequence.
 func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
-	apiSock, err := a.launchFC(sb, "fc.log")
+	apiSock, err := a.launchFC(ctx, sb, "fc.log")
 	if err != nil {
 		return err
 	}
@@ -362,6 +383,16 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 	if err := sb.machine.To(lifecycle.StatePausing); err != nil {
 		return err
 	}
+	if err := a.doPause(ctx, sb); err != nil {
+		a.abortPause(ctx, sb, err)
+		return err
+	}
+	return sb.machine.To(lifecycle.StatePausedHot)
+}
+
+// doPause runs the mode-specific pause pipeline. The machine is already in
+// PAUSING; the caller owns the rollback on error (abortPause).
+func (a *Agent) doPause(ctx context.Context, sb *sandbox) error {
 	c := fcclient.New(a.fcAPISock(sb))
 	if a.chunked() && a.cfg.PauseBalloonSettle > 0 {
 		// Balloon-assisted pause (docs/zh/02 §3): inflating hands the
@@ -379,10 +410,7 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 		return err
 	}
 	if a.chunked() {
-		if err := a.pauseChunked(ctx, sb); err != nil {
-			return err
-		}
-		return sb.machine.To(lifecycle.StatePausedHot)
+		return a.pauseChunked(ctx, sb)
 	}
 	snapDir := filepath.Join(sb.dir, "snap")
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
@@ -396,10 +424,34 @@ func (a *Agent) PauseSandbox(ctx context.Context, sandboxID string) error {
 	}
 	a.killFC(sb)
 	sb.snapCount++
-	if _, err := a.cfg.Storage.Snapshot(ctx, sandboxID, "p"+strconv.Itoa(sb.snapCount)); err != nil {
+	if _, err := a.cfg.Storage.Snapshot(ctx, sb.id, "p"+strconv.Itoa(sb.snapCount)); err != nil {
 		return err
 	}
-	return sb.machine.To(lifecycle.StatePausedHot)
+	return nil
+}
+
+// abortPause unwedges a failed pause: PAUSING's only forward edge is
+// →PAUSED_HOT, which a failed pause never reaches, so without a rollback
+// the sandbox is stranded forever. With Firecracker still alive the
+// snapshot never completed — resume the VM in place and go back to
+// RUNNING. Past the kill, land in FAILED: the last completed write-through
+// snapshot restores it (crash semantics), locally or elsewhere.
+func (a *Agent) abortPause(ctx context.Context, sb *sandbox, cause error) {
+	a.mu.Lock()
+	alive := sb.fc != nil
+	a.mu.Unlock()
+	if alive {
+		if err := fcclient.New(a.fcAPISock(sb)).PatchVMState(ctx, "Resumed"); err == nil {
+			if sb.machine.CAS(lifecycle.StatePausing, lifecycle.StateRunning) == nil {
+				log.Printf("nodeagent: pause %s aborted (%v); VM resumed in place", sb.id, cause)
+				return
+			}
+		}
+	}
+	a.killFC(sb)
+	a.killUffd(sb)
+	_ = sb.machine.CAS(lifecycle.StatePausing, lifecycle.StateFailed)
+	log.Printf("nodeagent: pause %s failed (%v); sandbox FAILED, restorable from its last completed snapshot", sb.id, cause)
 }
 
 // ResumeSandbox restores the VM from its snapshot via the uffd handler.
@@ -474,7 +526,7 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (st nodeapi.Sandbo
 	a.mu.Lock()
 	sb.uffd = uffd
 	a.mu.Unlock()
-	if err := waitSocket(uffdSock, 5*time.Second); err != nil {
+	if err := waitSocket(ctx, uffdSock, 5*time.Second); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
 	// The handler runs as root; a jailed Firecracker connects as its own
@@ -485,7 +537,7 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (st nodeapi.Sandbo
 		}
 	}
 
-	apiSock, err := a.launchFC(sb, "fc-resume.log")
+	apiSock, err := a.launchFC(ctx, sb, "fc-resume.log")
 	if err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("start firecracker (resume): %w", err)
 	}
@@ -526,7 +578,7 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (st nodeapi.Sandbo
 			log.Printf("nodeagent: balloon deflate %s: %v", sb.id, err)
 		}
 	}
-	return a.statusLocked(sb), nil
+	return a.status(sb), nil
 }
 
 // SnapshotSandbox pauses, snapshots, and resumes (a caller-visible snapshot).
@@ -565,7 +617,7 @@ func (a *Agent) Status(_ context.Context, sandboxID string) (nodeapi.SandboxStat
 	if err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
-	return a.statusLocked(sb), nil
+	return a.status(sb), nil
 }
 
 // Exec runs a command in the guest via guestd.
@@ -684,7 +736,7 @@ func (a *Agent) get(id string) (*sandbox, error) {
 	return sb, nil
 }
 
-func (a *Agent) statusLocked(sb *sandbox) nodeapi.SandboxStatus {
+func (a *Agent) status(sb *sandbox) nodeapi.SandboxStatus {
 	return nodeapi.SandboxStatus{
 		SandboxID: sb.id,
 		State:     string(sb.machine.State()),
@@ -700,7 +752,8 @@ func (a *Agent) guestClient(sb *sandbox) *guestapi.Client {
 	return guestapi.NewClient(fmt.Sprintf("http://%s:%d", sb.lease.GuestIP, guestapi.Port), hc)
 }
 
-// waitGuest polls guestd /healthz until it answers or the deadline passes.
+// waitGuest polls guestd /healthz until it answers, the deadline passes, or
+// the caller's context is canceled.
 func (a *Agent) waitGuest(ctx context.Context, sb *sandbox, timeout time.Duration) error {
 	if sb.guest == nil {
 		sb.guest = a.guestClient(sb)
@@ -715,7 +768,11 @@ func (a *Agent) waitGuest(ctx context.Context, sb *sandbox, timeout time.Duratio
 		}
 		// Fine-grained so resume-readiness (and its measured latency) is not
 		// quantized coarsely; the exit-criteria hot-resume budget is <1s.
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("timeout after %s", timeout)
 }
@@ -760,13 +817,17 @@ func (a *Agent) cleanup(ctx context.Context, sb *sandbox) {
 }
 
 // waitSocket waits for a unix socket file to appear.
-func waitSocket(path string, timeout time.Duration) error {
+func waitSocket(ctx context.Context, path string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if fi, err := os.Stat(path); err == nil && fi.Mode()&fs.ModeSocket != 0 {
 			return nil
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("timeout waiting for socket %s", path)
 }
@@ -777,7 +838,7 @@ func waitSocket(path string, timeout time.Duration) error {
 // 50-way create concurrency). Only for sockets whose owner tolerates a probe
 // connection (the FC API server); the uffd socket expects exactly one peer —
 // Firecracker — and must keep the stat-based wait.
-func waitSocketReady(path string, timeout time.Duration) error {
+func waitSocketReady(ctx context.Context, path string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -787,7 +848,11 @@ func waitSocketReady(path string, timeout time.Duration) error {
 			return nil
 		}
 		lastErr = err
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("timeout waiting for socket %s to accept: %w", path, lastErr)
 }
