@@ -86,10 +86,8 @@ func (b *ZFSBackend) ReceiveTemplate(ctx context.Context, templateID string, r i
 	}
 	// zfs receive does not create ancestors; a node that never built a
 	// template has no templates/ container yet.
-	if parent := b.pool + "/templates"; !b.datasetExists(ctx, parent) {
-		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
-			return err
-		}
+	if err := b.ensureParent(ctx, b.pool+"/templates"); err != nil {
+		return err
 	}
 	return b.stream(ctx, r, nil, "receive", ds)
 }
@@ -144,10 +142,8 @@ func (b *ZFSBackend) receiveDelta(ctx context.Context, sandboxID, origin string,
 	if err := validateID("sandbox", sandboxID); err != nil {
 		return err
 	}
-	if parent := b.pool + "/sandboxes"; !b.datasetExists(ctx, parent) {
-		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
-			return err
-		}
+	if err := b.ensureParent(ctx, b.pool+"/sandboxes"); err != nil {
+		return err
 	}
 	sds := b.sandboxDS(sandboxID)
 	if !b.datasetExists(ctx, sds) {

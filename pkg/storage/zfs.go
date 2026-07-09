@@ -51,6 +51,21 @@ func (b *ZFSBackend) datasetExists(ctx context.Context, ds string) bool {
 	return err == nil
 }
 
+// ensureParent idempotently creates a container dataset. The probe+create
+// pair is not atomic — concurrent FIRST creates on a node (a parallel batch,
+// a fork fan-out) race it, and the losers must treat "dataset already
+// exists" as the success it is.
+func (b *ZFSBackend) ensureParent(ctx context.Context, parent string) error {
+	if b.datasetExists(ctx, parent) {
+		return nil
+	}
+	if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil &&
+		!strings.Contains(err.Error(), "dataset already exists") {
+		return err
+	}
+	return nil
+}
+
 // Paths implements Backend. It derives paths from the pool's conventional
 // mountpoint (<pool> mounts at /<pool> by default) to stay pure (no exec).
 func (b *ZFSBackend) Paths(sandboxID string) SandboxPaths {
@@ -113,10 +128,8 @@ func (b *ZFSBackend) CloneSandbox(ctx context.Context, sandboxID, templateID str
 	// zfs clone does not create parent datasets, so the sandboxes container
 	// must exist first (create -p errors if the leaf already exists, hence
 	// the existence probe).
-	if parent := b.pool + "/sandboxes"; !b.datasetExists(ctx, parent) {
-		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
-			return SandboxPaths{}, err
-		}
+	if err := b.ensureParent(ctx, b.pool+"/sandboxes"); err != nil {
+		return SandboxPaths{}, err
 	}
 	sds := b.sandboxDS(sandboxID)
 	if _, err := b.run(ctx, "zfs", "clone", b.templateDS(templateID)+"@final", sds); err != nil {
@@ -148,10 +161,8 @@ func (b *ZFSBackend) CloneSandboxFrom(ctx context.Context, newID, srcID, tag str
 			return SandboxPaths{}, err
 		}
 	}
-	if parent := b.pool + "/sandboxes"; !b.datasetExists(ctx, parent) {
-		if _, err := b.run(ctx, "zfs", "create", "-p", parent); err != nil {
-			return SandboxPaths{}, err
-		}
+	if err := b.ensureParent(ctx, b.pool+"/sandboxes"); err != nil {
+		return SandboxPaths{}, err
 	}
 	nds := b.sandboxDS(newID)
 	if _, err := b.run(ctx, "zfs", "clone", b.sandboxDS(srcID)+"@"+tag, nds); err != nil {
