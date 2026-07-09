@@ -93,11 +93,11 @@ jobs:
           set -o pipefail
           sudo -E env "PATH=$PATH" \
             go test ./pkg/nodeagent/ \
-            -run 'TestHotRestoreP50|TestWarmRestoreP99|TestCrossNodeRestore|TestDiffChain|TestDedupReport' \
+            -run 'TestHotRestoreP50|TestWarmRestoreP99|TestCrossNodeRestore|TestDiffChain|TestDedupReport|TestResumeFailureRollback|TestReleaseResumeRaceLocal' \
             -v -count=1 -timeout 40m \
             | tee /tmp/m2-exit.log
           # Every gate MUST actually run and PASS (skips are false greens).
-          for t in TestHotRestoreP50 TestWarmRestoreP99 TestCrossNodeRestore TestDiffChain TestDedupReport; do
+          for t in TestHotRestoreP50 TestWarmRestoreP99 TestCrossNodeRestore TestDiffChain TestDedupReport TestResumeFailureRollback TestReleaseResumeRaceLocal; do
             grep -q -- "--- PASS: $t" /tmp/m2-exit.log \
               || { echo "::error::$t did not PASS (skipped?)"; exit 1; }
           done

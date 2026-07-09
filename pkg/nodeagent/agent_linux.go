@@ -244,6 +244,14 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	a.mu.Unlock()
 
 	if err := a.waitGuest(ctx, sb, 30*time.Second); err != nil {
+		// A booted-but-unreachable guest is not a sandbox: off the books
+		// first (a.get must stop resolving it), then release everything —
+		// otherwise the VM, lease, cgroup, and dataset leak as RUNNING and
+		// count against capacity forever.
+		a.mu.Lock()
+		delete(a.sbx, req.SandboxID)
+		a.mu.Unlock()
+		a.cleanup(ctx, sb)
 		return nodeapi.SandboxStatus{}, fmt.Errorf("guestd did not come up: %w", err)
 	}
 	metrics.CreateSeconds.WithLabelValues("cold").Observe(time.Since(createStart).Seconds())
@@ -277,11 +285,15 @@ func (a *Agent) launchFC(sb *sandbox, logName string) (string, error) {
 	logf, _ := os.Create(filepath.Join(sb.dir, logName))
 	if logf != nil {
 		fc.Stdout, fc.Stderr = logf, logf
+		// Start dups the fd into the child; the parent copy is a pure leak.
+		defer logf.Close()
 	}
 	if err := fc.Start(); err != nil {
 		return "", fmt.Errorf("start firecracker: %w", err)
 	}
+	a.mu.Lock()
 	sb.fc = fc
+	a.mu.Unlock()
 	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
 	if err := waitSocketReady(apiSock, 10*time.Second); err != nil {
 		return "", err
@@ -403,7 +415,7 @@ func (a *Agent) ResumeSandbox(ctx context.Context, sandboxID string) (nodeapi.Sa
 // resume is the shared implementation. RestoreSandbox, fastCreate, and
 // SnapshotSandbox come here directly: the flow the user invoked owns the
 // metrics observation, so nothing is counted twice.
-func (a *Agent) resume(ctx context.Context, sandboxID string) (nodeapi.SandboxStatus, error) {
+func (a *Agent) resume(ctx context.Context, sandboxID string) (st nodeapi.SandboxStatus, err error) {
 	sb, err := a.get(sandboxID)
 	if err != nil {
 		return nodeapi.SandboxStatus{}, err
@@ -411,6 +423,23 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (nodeapi.SandboxSt
 	if err := sb.machine.To(lifecycle.StateResuming); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
+	// A failed resume must not strand a half-started sandbox: RESUMING's only
+	// forward edge is →RUNNING, so without this rollback the machine wedges
+	// forever while the just-launched uffd handler and Firecracker leak. Kill
+	// whatever was started and land in FAILED — recoverable via the restore
+	// path (the watchdog's reapZombies comment relies on exactly this).
+	defer func() {
+		if err == nil {
+			return
+		}
+		a.killFC(sb)
+		a.killUffd(sb)
+		if cerr := sb.machine.CAS(lifecycle.StateResuming, lifecycle.StateFailed); cerr != nil {
+			// Already past To(StateRunning): a waitGuest failure leaves a
+			// booted-but-unreachable guest — equally FAILED.
+			_ = sb.machine.CAS(lifecycle.StateRunning, lifecycle.StateFailed)
+		}
+	}()
 	snapDir := filepath.Join(sb.dir, "snap")
 	uffdSock := filepath.Join(snapDir, "uffd.sock")
 	_ = os.Remove(uffdSock)
@@ -437,11 +466,14 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (nodeapi.SandboxSt
 	ulog, _ := os.Create(filepath.Join(sb.dir, "uffd.log"))
 	if ulog != nil {
 		uffd.Stdout, uffd.Stderr = ulog, ulog
+		defer ulog.Close()
 	}
 	if err := uffd.Start(); err != nil {
 		return nodeapi.SandboxStatus{}, fmt.Errorf("start uffd handler: %w", err)
 	}
+	a.mu.Lock()
 	sb.uffd = uffd
+	a.mu.Unlock()
 	if err := waitSocket(uffdSock, 5*time.Second); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
@@ -688,19 +720,28 @@ func (a *Agent) waitGuest(ctx context.Context, sb *sandbox, timeout time.Duratio
 	return fmt.Errorf("timeout after %s", timeout)
 }
 
+// killFC and killUffd swap the process pointer out under a.mu — the watchdog
+// and PidsOf read sb.fc/sb.uffd under the same lock — and kill/reap outside
+// it so a slow Wait cannot stall every other agent verb.
 func (a *Agent) killFC(sb *sandbox) {
-	if sb.fc != nil && sb.fc.Process != nil {
-		_ = sb.fc.Process.Kill()
-		_, _ = sb.fc.Process.Wait()
-		sb.fc = nil
+	a.mu.Lock()
+	fc := sb.fc
+	sb.fc = nil
+	a.mu.Unlock()
+	if fc != nil && fc.Process != nil {
+		_ = fc.Process.Kill()
+		_, _ = fc.Process.Wait()
 	}
 }
 
 func (a *Agent) killUffd(sb *sandbox) {
-	if sb.uffd != nil && sb.uffd.Process != nil {
-		_ = sb.uffd.Process.Kill()
-		_, _ = sb.uffd.Process.Wait()
-		sb.uffd = nil
+	a.mu.Lock()
+	uffd := sb.uffd
+	sb.uffd = nil
+	a.mu.Unlock()
+	if uffd != nil && uffd.Process != nil {
+		_ = uffd.Process.Kill()
+		_, _ = uffd.Process.Wait()
 	}
 }
 

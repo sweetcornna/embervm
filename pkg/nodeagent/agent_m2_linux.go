@@ -417,26 +417,31 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 // process died), escalating to SIGTERM so a stuck handler cannot block the
 // pause path. Either way the process is reaped.
 func (a *Agent) drainUffd(sb *sandbox, grace time.Duration) {
-	if sb.uffd == nil || sb.uffd.Process == nil {
+	// Pointer swap under a.mu, like killFC/killUffd: the watchdog reads
+	// sb.uffd under the same lock.
+	a.mu.Lock()
+	uffd := sb.uffd
+	sb.uffd = nil
+	a.mu.Unlock()
+	if uffd == nil || uffd.Process == nil {
 		return
 	}
 	done := make(chan struct{})
 	go func() {
-		_, _ = sb.uffd.Process.Wait()
+		_, _ = uffd.Process.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(grace):
-		_ = sb.uffd.Process.Signal(syscall.SIGTERM)
+		_ = uffd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			_ = sb.uffd.Process.Kill()
+			_ = uffd.Process.Kill()
 			<-done
 		}
 	}
-	sb.uffd = nil
 }
 
 // --- small L1 plumbing ------------------------------------------------------

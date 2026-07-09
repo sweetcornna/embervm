@@ -45,6 +45,15 @@ func (a *Agent) ReleaseLocal(ctx context.Context, sandboxID string) error {
 	if !ok {
 		return fmt.Errorf("release %s: L1 has no restore descriptor; refusing to drop local state", sandboxID)
 	}
+	// Claim the sandbox (destructive-transition discipline, like the
+	// watchdog's reap): winning PAUSED_HOT→STOPPING makes this release the
+	// sole actor — a concurrent local resume can no longer enter RESUMING
+	// mid-teardown. Losing means a live verb moved it first; abandon. The
+	// a.sbx entry is deleted LAST so a cross-node restore keeps waiting the
+	// release out (ADR-0004 D2).
+	if err := sb.machine.CAS(lifecycle.StatePausedHot, lifecycle.StateStopping); err != nil {
+		return fmt.Errorf("release %s: %w", sandboxID, err)
+	}
 
 	a.killFC(sb)
 	a.killUffd(sb)
@@ -55,9 +64,11 @@ func (a *Agent) ReleaseLocal(ctx context.Context, sandboxID string) error {
 	a.clearEgress(ctx, sb)
 	sb.lease.Release()
 	if err := a.cfg.Storage.DestroySandbox(ctx, sandboxID); err != nil {
+		_ = sb.machine.To(lifecycle.StateFailed)
 		return fmt.Errorf("release %s: destroy dataset: %w", sandboxID, err)
 	}
 	if err := os.RemoveAll(sb.dir); err != nil {
+		_ = sb.machine.To(lifecycle.StateFailed)
 		return fmt.Errorf("release %s: remove workdir: %w", sandboxID, err)
 	}
 	a.mu.Lock()
