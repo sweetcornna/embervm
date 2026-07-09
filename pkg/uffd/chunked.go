@@ -89,6 +89,18 @@ func (h *Handler) populateChunk(ci int, scratch []byte, ctr *atomic.Uint64) erro
 			return err
 		}
 	}
+	// A balloon REMOVE that landed while we copied zapped part of this
+	// range after (or before) our COPY — which pages hold snapshot bytes
+	// and which are gone is unknowable now. Do NOT mark the chunk
+	// populated: future faults must keep flowing to the removed-aware
+	// path (zeros for zapped pages) instead of being silently skipped.
+	for _, p := range pieces {
+		if h.removed.intersects(p.hostAddr, p.hostAddr+p.length) {
+			h.stats.RemoveRaces.Add(1)
+			h.logf("chunked: REMOVE raced populate of chunk %d; left unpopulated", ci)
+			return nil
+		}
+	}
 	h.populated[ci].Store(true)
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -474,9 +475,13 @@ func putStreamTo(ctx context.Context, dst chunkstore.Objects, key string, produc
 		done <- err
 	}()
 	putErr := dst.PutObject(ctx, key, pr, -1)
+	// If PutObject bailed early (ctx cancel, network error) without draining
+	// the pipe, the producer is blocked in Write and `done` never fires —
+	// close the read end to unblock it before collecting.
+	_ = pr.CloseWithError(putErr)
 	produceErr := <-done
-	if produceErr != nil {
-		return produceErr
+	if produceErr != nil && !errors.Is(produceErr, io.ErrClosedPipe) {
+		return produceErr // genuine producer failure, not the echo of our close
 	}
 	return putErr
 }

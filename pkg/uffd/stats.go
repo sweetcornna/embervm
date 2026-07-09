@@ -16,6 +16,7 @@ type Stats struct {
 	BytesCopiedPrefetch atomic.Uint64
 	Zeropages           atomic.Uint64
 	RemoveEvents        atomic.Uint64
+	RemoveRaces         atomic.Uint64 // balloon REMOVE landed mid-populate
 	Regions             atomic.Int64
 	MemTotalBytes       atomic.Uint64
 
@@ -37,6 +38,7 @@ type StatsSnapshot struct {
 	BytesCopiedPrefetch uint64 `json:"bytes_copied_prefetch"`
 	Zeropages           uint64 `json:"zeropages"`
 	RemoveEvents        uint64 `json:"remove_events"`
+	RemoveRaces         uint64 `json:"remove_races"`
 	Regions             int64  `json:"regions"`
 	MemTotalBytes       uint64 `json:"mem_total_bytes"`
 
@@ -56,6 +58,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		BytesCopiedPrefetch: s.BytesCopiedPrefetch.Load(),
 		Zeropages:           s.Zeropages.Load(),
 		RemoveEvents:        s.RemoveEvents.Load(),
+		RemoveRaces:         s.RemoveRaces.Load(),
 		Regions:             s.Regions.Load(),
 		MemTotalBytes:       s.MemTotalBytes.Load(),
 		ChunksServedFault:   s.ChunksServedFault.Load(),

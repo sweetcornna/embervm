@@ -86,6 +86,7 @@ type Handler struct {
 	faultBuf  []byte        // fault-loop scratch (prefetch has its own)
 	wsRec     *wsRecorder   // non-nil only while recording a first-resume WS
 
+	bg       sync.WaitGroup // watchPeer + prefetch goroutines; joined before cleanup
 	quit     chan struct{}
 	quitOnce sync.Once
 }
@@ -177,16 +178,38 @@ func (h *Handler) Serve() error {
 
 	// Firecracker holds the peer end open for the VM's lifetime; EOF here
 	// means the VM exited and we should too.
-	go h.watchPeer()
+	h.bg.Add(1)
+	go func() {
+		defer h.bg.Done()
+		h.watchPeer()
+	}()
 
 	switch h.cfg.Mode {
 	case ModePrefetch:
-		go h.prefetch()
+		h.bg.Add(1)
+		go func() {
+			defer h.bg.Done()
+			h.prefetch()
+		}()
 	case ModeChunked:
-		go h.chunkedPrefetch(ws)
+		h.bg.Add(1)
+		go func() {
+			defer h.bg.Done()
+			h.chunkedPrefetch(ws)
+		}()
 	}
 
-	return h.faultLoop()
+	err = h.faultLoop()
+	// The deferred cleanup closes h.uffd and unmaps the COPY sources the
+	// background goroutines are still using — a POLLHUP exit in particular
+	// used to leave the prefetcher issuing UFFDIO_COPY against a closed (or
+	// worse, recycled) fd. Stop them and JOIN before the defers run.
+	h.Stop()
+	if h.conn != nil {
+		_ = h.conn.SetReadDeadline(time.Now()) // unblock watchPeer's Read
+	}
+	h.bg.Wait()
+	return err
 }
 
 func (h *Handler) mapBacking() error {
@@ -278,10 +301,12 @@ func (h *Handler) handleMsg(msg []byte) error {
 	case uffdEventRemove, uffdEventUnmap:
 		// a=start, b=end. The kernel already zapped these pages (balloon
 		// madvise); snapshot contents are stale for this range, so future
-		// faults must see zeros. Note: a background prefetch COPY that races
-		// this event could re-populate stale bytes; M0 VMs carry no balloon
-		// device so the event is not expected — we track it defensively and
-		// count it so the race would at least be visible in metrics.
+		// faults must see zeros. Every VM carries a balloon device (bootFresh
+		// PutBalloon; M4 oversell inflates it), so these events are routine.
+		// A background prefetch COPY racing this event is handled on the
+		// populate side: populateChunk re-checks the removed set after its
+		// COPY and refuses to mark a colliding chunk populated (counted in
+		// RemoveRaces).
 		h.removed.add(a, b)
 		h.stats.RemoveEvents.Add(1)
 		h.logf("remove/unmap event: [%#x, %#x)", a, b)
