@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/embervm/embervm/pkg/guestapi"
 )
@@ -46,14 +47,39 @@ func NewServer(a Agent) http.Handler {
 	if gd, ok := a.(GuestDialer); ok {
 		// Gateway data path: any method, any subpath, WebSocket-transparent
 		// (httputil.ReverseProxy passes Upgrade through).
-		mux.Handle("/sandboxes/{id}/guest/{port}/", &guestProxy{dial: gd.DialGuest})
+		mux.Handle("/sandboxes/{id}/guest/{port}/",
+			&guestProxy{transport: NewGuestTransport(gd.DialGuest)})
 	}
 	return mux
 }
 
+// NewGuestTransport builds a long-lived Transport that routes each request
+// to the sandbox and port encoded in the URL host ("<sandboxID>:<port>").
+// Guest proxies MUST share one of these per dialer: a per-request Transport
+// strands every keep-alive connection (plus its readLoop goroutine) in a
+// pool nothing ever reuses or closes — a connection leak per request — and
+// defeats connection reuse entirely.
+func NewGuestTransport(dial func(ctx context.Context, sandboxID string, port int) (net.Conn, error)) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			host, portStr, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("guest proxy: bad target %q: %w", addr, err)
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				return nil, fmt.Errorf("guest proxy: bad port %q", portStr)
+			}
+			return dial(ctx, host, port)
+		},
+		MaxIdleConnsPerHost: 4, // pooled per sandbox:port (the URL host)
+		IdleConnTimeout:     90 * time.Second,
+	}
+}
+
 // guestProxy reverse-proxies into the sandbox netns.
 type guestProxy struct {
-	dial func(ctx context.Context, sandboxID string, port int) (net.Conn, error)
+	transport *http.Transport
 }
 
 func (g *guestProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,17 +93,13 @@ func (g *guestProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = "guest"
+			pr.Out.URL.Host = net.JoinHostPort(id, strconv.Itoa(port))
 			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, prefix)
 			if pr.Out.URL.Path == "" {
 				pr.Out.URL.Path = "/"
 			}
 		},
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return g.dial(ctx, id, port)
-			},
-		},
+		Transport: g.transport,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			writeJSON(w, http.StatusBadGateway, guestapi.ErrorResponse{Error: err.Error()})
 		},
@@ -322,6 +344,10 @@ func (s *server) readFile(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// maxWriteFileBody bounds PUT /files bodies (the largest legitimate payload
+// is a restored artifacts tar, capped at 1 GiB by the control plane).
+const maxWriteFileBody = 1 << 30
+
 func (s *server) writeFile(w http.ResponseWriter, r *http.Request) {
 	mode := fs.FileMode(0o644)
 	if raw := r.URL.Query().Get("mode"); raw != "" {
@@ -330,9 +356,10 @@ func (s *server) writeFile(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: "mode must be octal"})
 			return
 		}
-		mode = fs.FileMode(parsed)
+		// Permission bits only: no setuid/setgid/sticky smuggled into the guest.
+		mode = fs.FileMode(parsed) & fs.ModePerm
 	}
-	data, err := io.ReadAll(r.Body)
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWriteFileBody))
 	if err != nil {
 		fail(w, err)
 		return
@@ -366,6 +393,13 @@ func NewClient(socketPath string) *Client {
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
 				},
+				// A wedged node daemon must not pin a control-plane handler
+				// goroutine forever. Header-level only: bodies stream for as
+				// long as they need (guest proxy, template builds), and slow
+				// verbs (a long Exec answers with headers only when the
+				// command finishes) get a deliberately generous bound.
+				ResponseHeaderTimeout: 15 * time.Minute,
+				IdleConnTimeout:       90 * time.Second,
 			},
 		},
 	}

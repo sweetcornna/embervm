@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,19 +16,26 @@ type TokenInfo struct {
 	MaxSandboxes int    `json:"max_sandboxes"`
 }
 
-// TokenStore maps bearer tokens to their grants.
+// TokenStore maps bearer tokens to their grants. Tokens are stored and
+// compared as SHA-256 digests: a plain-string map lookup would compare
+// secret material byte-by-byte (a timing side channel), and hashing also
+// keeps raw tokens out of process memory dumps.
 type TokenStore struct {
-	tokens map[string]TokenInfo
+	tokens map[[sha256.Size]byte]TokenInfo
 }
 
 // NewTokenStore builds a token store from a token→info map.
 func NewTokenStore(tokens map[string]TokenInfo) *TokenStore {
-	return &TokenStore{tokens: tokens}
+	hashed := make(map[[sha256.Size]byte]TokenInfo, len(tokens))
+	for token, info := range tokens {
+		hashed[sha256.Sum256([]byte(token))] = info
+	}
+	return &TokenStore{tokens: hashed}
 }
 
 // Lookup returns the info for a token, ok=false if unknown.
 func (ts *TokenStore) Lookup(token string) (TokenInfo, bool) {
-	info, ok := ts.tokens[token]
+	info, ok := ts.tokens[sha256.Sum256([]byte(token))]
 	return info, ok
 }
 

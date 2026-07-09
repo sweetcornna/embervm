@@ -101,13 +101,19 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/", nodeapi.NewServer(agent))
-	srv := &http.Server{Handler: mux}
+	// Header-read bound only: guest-proxy responses stream (WebSockets), so
+	// no global WriteTimeout.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigc
-		_ = srv.Close()
+		// Drain in-flight requests (a mid-flight pause write-through must
+		// finish) instead of cutting them.
+		shCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shCtx)
 		_ = p.Teardown(ctx)
 	}()
 

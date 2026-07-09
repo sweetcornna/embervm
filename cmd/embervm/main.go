@@ -143,13 +143,22 @@ func runDev(args []string) {
 	go engine.Run(ctx)
 
 	srv := controlplane.NewServer(store, agent, tokens, l1, cold)
-	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:    *listen,
+		Handler: srv.Handler(),
+		// Header-read bound only: the guest proxy streams (WebSockets), so
+		// no global WriteTimeout.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigc
-		_ = httpSrv.Close()
+		// Drain in-flight requests instead of cutting them mid-response.
+		shCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shCtx)
 		_ = pool.Teardown(ctx)
 	}()
 

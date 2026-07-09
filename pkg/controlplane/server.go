@@ -13,10 +13,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/guestapi"
@@ -35,6 +37,13 @@ type Server struct {
 	tokens   *TokenStore
 	l1       chunkstore.ListingBackend // warm object store (nil: reports/tiers degrade)
 	cold     chunkstore.ListingBackend // cold object store
+
+	// Long-lived guest-proxy transports, one per in-proc (GuestDialer) node:
+	// a per-request Transport leaks its keep-alive connections and readLoop
+	// goroutines (see nodeapi.NewGuestTransport). Static membership bounds
+	// the map.
+	gtMu            sync.Mutex
+	guestTransports map[string]*http.Transport
 }
 
 // LocalNodeID names the implicit node of a single-agent deployment.
@@ -60,7 +69,21 @@ func NewServer(store *Store, agent nodeapi.Agent, tokens *TokenStore, l1, cold c
 // through the registry and placement goes through the scheduler. The caller
 // runs sched.RegisterNodes + sched.Run.
 func NewClusterServer(store *Store, registry *Registry, sched *Scheduler, tokens *TokenStore, l1, cold chunkstore.ListingBackend) *Server {
-	return &Server{store: store, registry: registry, sched: sched, tokens: tokens, l1: l1, cold: cold}
+	return &Server{store: store, registry: registry, sched: sched, tokens: tokens, l1: l1, cold: cold,
+		guestTransports: map[string]*http.Transport{}}
+}
+
+// guestTransportFor returns the shared proxy transport for one node's
+// GuestDialer, creating it on first use.
+func (s *Server) guestTransportFor(nodeID string, g nodeapi.GuestDialer) *http.Transport {
+	s.gtMu.Lock()
+	defer s.gtMu.Unlock()
+	if t, ok := s.guestTransports[nodeID]; ok {
+		return t
+	}
+	t := nodeapi.NewGuestTransport(g.DialGuest)
+	s.guestTransports[nodeID] = t
+	return t
 }
 
 // AgentResolver adapts the registry for the lifecycle engine (its TierAgent
@@ -88,6 +111,31 @@ func (s *Server) agentOf(c *gin.Context, sb Sandbox) (nodeapi.Agent, bool) {
 	return a, true
 }
 
+// Request-body caps: a single request must not be able to pin unbounded
+// memory. Handlers buffer bodies (JSON binds, writeFile's io.ReadAll), so
+// the cap is the backstop. The guest proxy is exempt — it streams.
+const (
+	maxJSONBody = 32 << 20 // exec stdin (base64) is the largest JSON payload
+	maxFileBody = 1 << 30  // PUT /files; matches the artifacts-tar cap
+)
+
+// limitBodies is Gin middleware applying the per-route body cap.
+func limitBodies() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		route := c.FullPath()
+		if strings.Contains(route, "/proxy/") || c.Request.Body == nil {
+			c.Next()
+			return
+		}
+		limit := int64(maxJSONBody)
+		if c.Request.Method == http.MethodPut && strings.HasSuffix(route, "/files") {
+			limit = maxFileBody
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+		c.Next()
+	}
+}
+
 // Handler builds the Gin router (mounted at /v0, plus an unauthenticated
 // /healthz).
 func (s *Server) Handler() http.Handler {
@@ -96,7 +144,7 @@ func (s *Server) Handler() http.Handler {
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 
-	v0 := r.Group("/v0", s.tokens.Auth())
+	v0 := r.Group("/v0", s.tokens.Auth(), limitBodies())
 	v0.POST("/templates", s.createTemplate)
 	v0.GET("/templates", s.listTemplates)
 	v0.GET("/templates/:id", s.getTemplate)
@@ -149,6 +197,22 @@ func (s *Server) ownedSandbox(c *gin.Context, id string) (Sandbox, bool) {
 	return sb, true
 }
 
+// stopOrphanedVM compensates the "acted on the node, then the record write
+// failed" ordering: a VM the node successfully created (create/fork/restore-
+// artifacts) whose control-plane row could not be updated would otherwise run
+// as an invisible orphan — memory the scheduler cannot see, quota the owner
+// cannot free. Best-effort, on a cancellation-immune context: the client may
+// already be gone.
+func (s *Server) stopOrphanedVM(c *gin.Context, agent nodeapi.Agent, id, verb string, cause error) {
+	ctx := context.WithoutCancel(c.Request.Context())
+	if err := agent.StopSandbox(ctx, id); err != nil {
+		log.Printf("controlplane: %s %s: record write failed (%v) and the compensating stop also failed: %v — VM may be orphaned on its node", verb, id, cause, err)
+	} else {
+		log.Printf("controlplane: %s %s: record write failed (%v); stopped the just-created VM", verb, id, cause)
+	}
+	_ = s.store.SetSandboxState(ctx, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", cause.Error())
+}
+
 // storeStatus maps store errors to HTTP status.
 func storeStatus(err error) int {
 	if errors.Is(err, ErrNotFound) {
@@ -183,13 +247,17 @@ func (s *Server) createTemplate(c *gin.Context) {
 	}
 	// Builds synchronously on one node; the template ships to every other
 	// node as a zfs stream via L1 (GUID lineage) and is received on demand.
+	// Every early exit must set ERROR: a row stuck BUILDING squats its
+	// unique name forever.
 	buildNode, err := s.sched.Place(c, "", 0, 0)
 	if err != nil {
+		_ = s.store.SetTemplateState(c, id, "ERROR", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
 	}
 	agent, err := s.agentByID(buildNode)
 	if err != nil {
+		_ = s.store.SetTemplateState(c, id, "ERROR", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
 	}
@@ -254,8 +322,19 @@ func (s *Server) createSandbox(c *gin.Context) {
 		abortErr(c, http.StatusBadRequest, errors.New("template_id is required"))
 		return
 	}
-	if _, err := s.store.GetTemplate(c, body.TemplateID); err != nil {
+	if err := validateGeometry(body.VCPUs, body.MemoryMiB, body.DataDiskGiB); err != nil {
+		abortErr(c, http.StatusBadRequest, err)
+		return
+	}
+	tpl, err := s.store.GetTemplate(c, body.TemplateID)
+	if err != nil {
 		abortErr(c, storeStatus(err), err)
+		return
+	}
+	if tpl.State != "READY" {
+		// A BUILDING/ERROR template would fail deep inside the node agent
+		// (and can orphan a half-created sandbox); refuse cleanly up front.
+		abortErr(c, http.StatusConflict, fmt.Errorf("template %s is %s, want READY", tpl.ID, tpl.State))
 		return
 	}
 
@@ -290,10 +369,13 @@ func (s *Server) createSandbox(c *gin.Context) {
 	}
 	agent, err := s.agentByID(nodeID)
 	if err != nil {
+		// FAILED, not a stuck PENDING row that burns quota forever.
+		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
 	}
 	if err := s.store.SetSandboxNode(c, id, nodeID); err != nil {
+		_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -309,11 +391,29 @@ func (s *Server) createSandbox(c *gin.Context) {
 		return
 	}
 	if err := s.store.SetSandboxState(c, id, string(lifecycle.StatePending), st.State, st.Netns, ""); err != nil {
+		// The VM is live but the record write failed: stop the orphan.
+		s.stopOrphanedVM(c, agent, id, "create", err)
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
 	sb.State, sb.Netns = st.State, st.Netns
 	c.JSON(http.StatusCreated, sb)
+}
+
+// validateGeometry bounds sandbox resources. Zero means "default" (the node
+// agent fills them); negatives would corrupt the scheduler's budgets
+// (SUM(memory_mib) usage, freeMem comparisons) and the caps keep one request
+// from absorbing a whole node.
+func validateGeometry(vcpus, memoryMiB, dataDiskGiB int) error {
+	switch {
+	case vcpus < 0 || vcpus > 64:
+		return fmt.Errorf("vcpus %d out of range [0,64]", vcpus)
+	case memoryMiB < 0 || memoryMiB > 1<<20:
+		return fmt.Errorf("memory_mib %d out of range [0,%d]", memoryMiB, 1<<20)
+	case dataDiskGiB < 0 || dataDiskGiB > 4096:
+		return fmt.Errorf("data_disk_gib %d out of range [0,4096]", dataDiskGiB)
+	}
+	return nil
 }
 
 func (s *Server) listSandboxes(c *gin.Context) {
@@ -413,6 +513,17 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		return
 	}
 	if err := s.store.SetSandboxState(c, id, string(lifecycle.StateResuming), st.State, st.Netns, ""); err != nil {
+		// The VM resumed but the record write failed. Unlike a fresh create,
+		// stopping would discard user state — pause it back instead (the
+		// write-through makes it durable again) and mark the row FAILED so
+		// the resume path can recover it.
+		bg := context.WithoutCancel(c.Request.Context())
+		if agent, aerr := s.agentByID(sb.NodeID); aerr == nil {
+			if perr := agent.PauseSandbox(bg, id); perr != nil {
+				log.Printf("controlplane: resume %s: record write failed (%v) and the compensating pause also failed: %v — VM may be orphaned on its node", id, err, perr)
+			}
+		}
+		_ = s.store.SetSandboxState(bg, id, string(lifecycle.StateResuming), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -547,9 +658,15 @@ func (s *Server) forkSandbox(c *gin.Context) {
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
 	}
-	if err := s.store.SetSandboxNode(c, id, parent.NodeID); err != nil && parent.NodeID != "" {
-		abortErr(c, http.StatusInternalServerError, err)
-		return
+	// Record the child's node before acting. A real store error must not be
+	// swallowed just because the parent sits on the implicit local node —
+	// the old `err != nil && parent.NodeID != ""` guard did exactly that.
+	if parent.NodeID != "" {
+		if err := s.store.SetSandboxNode(c, id, parent.NodeID); err != nil {
+			_ = s.store.SetSandboxState(c, id, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
+			abortErr(c, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	st, err := agent.Fork(c, parent.ID, cp.Layer, id)
 	if err != nil {
@@ -558,6 +675,7 @@ func (s *Server) forkSandbox(c *gin.Context) {
 		return
 	}
 	if err := s.store.SetSandboxState(c, id, string(lifecycle.StatePending), st.State, st.Netns, ""); err != nil {
+		s.stopOrphanedVM(c, agent, id, "fork", err)
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -655,17 +773,17 @@ func (s *Server) proxyGuest(c *gin.Context) {
 	var handler http.Handler
 	switch g := agent.(type) {
 	case nodeapi.GuestDialer: // in-proc: dial the netns directly
+		nodeID := sb.NodeID
+		if nodeID == "" {
+			nodeID = LocalNodeID
+		}
 		handler = &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.Out.URL.Scheme = "http"
-				pr.Out.URL.Host = "guest"
+				pr.Out.URL.Host = net.JoinHostPort(sb.ID, strconv.Itoa(port))
 				pr.Out.URL.Path = c.Param("path")
 			},
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return g.DialGuest(ctx, sb.ID, port)
-				},
-			},
+			Transport: s.guestTransportFor(nodeID, g),
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 				w.WriteHeader(http.StatusBadGateway)
 				_, _ = w.Write([]byte(err.Error()))
@@ -683,7 +801,12 @@ func (s *Server) proxyGuest(c *gin.Context) {
 		return
 	}
 	handler.ServeHTTP(c.Writer, c.Request)
-	metrics.ProxyRequests.WithLabelValues(strconv.Itoa(c.Writer.Status()/100) + "xx").Inc()
+	// A hijacked (WebSocket) or never-written response reports status 0.
+	label := "unknown"
+	if status := c.Writer.Status(); status >= 100 {
+		label = strconv.Itoa(status/100) + "xx"
+	}
+	metrics.ProxyRequests.WithLabelValues(label).Inc()
 }
 
 // sandboxStorage reports one sandbox's storage footprint by tier.
@@ -700,25 +823,38 @@ func (s *Server) sandboxStorage(c *gin.Context) {
 	c.JSON(http.StatusOK, rep)
 }
 
-// storageReportAll aggregates the caller's sandboxes (成本报表).
+// storageReportAll aggregates the caller's sandboxes (成本报表). Each report
+// costs several object-store round-trips, so reports run concurrently with
+// a bound — one request over a large fleet must neither serialize into a
+// multi-minute handler nor stampede the store.
 func (s *Server) storageReportAll(c *gin.Context) {
 	sbs, err := s.store.ListSandboxes(c, tokenInfo(c).Owner, "")
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
+	rows := make([]StorageReport, len(sbs))
+	g, gctx := errgroup.WithContext(c)
+	g.SetLimit(8)
+	for i, sb := range sbs {
+		g.Go(func() error {
+			rep, err := s.storageReport(gctx, sb)
+			if err != nil {
+				return err
+			}
+			rows[i] = rep
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
 	var (
-		rows                        []StorageReport
 		totalLogical, totalStored   int64
 		totalChunks, totalArtifacts int64
 	)
-	for _, sb := range sbs {
-		rep, err := s.storageReport(c, sb)
-		if err != nil {
-			abortErr(c, http.StatusInternalServerError, err)
-			return
-		}
-		rows = append(rows, rep)
+	for _, rep := range rows {
 		totalLogical += rep.LogicalBytes
 		totalStored += rep.StoredBytes
 		totalChunks += int64(rep.ChunkCount)
@@ -769,15 +905,18 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 	}
 	nodeID, err := s.sched.Place(c, sb.NodeID, sb.MemoryMiB, sb.VCPUs)
 	if err != nil {
+		_ = s.store.SetSandboxState(c, newID, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
 	}
 	agent, err := s.agentByID(nodeID)
 	if err != nil {
+		_ = s.store.SetSandboxState(c, newID, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
 		return
 	}
 	if err := s.store.SetSandboxNode(c, newID, nodeID); err != nil {
+		_ = s.store.SetSandboxState(c, newID, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -791,19 +930,30 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 		return
 	}
 	if err := s.store.SetSandboxState(c, newID, string(lifecycle.StatePending), st.State, st.Netns, ""); err != nil {
+		s.stopOrphanedVM(c, agent, newID, "restore-artifacts", err)
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
+	// From here the child is live AND recorded: any failure must stop it and
+	// surface its id, or the caller has a running sandbox it cannot find.
+	seedFail := func(cause error) {
+		bg := context.WithoutCancel(c.Request.Context())
+		if serr := agent.StopSandbox(bg, newID); serr != nil {
+			log.Printf("controlplane: restore-artifacts %s: seeding failed (%v) and the compensating stop also failed: %v", newID, cause, serr)
+		}
+		_ = s.store.SetSandboxState(bg, newID, st.State, string(lifecycle.StateFailed), "", cause.Error())
+		c.AbortWithStatusJSON(http.StatusInternalServerError,
+			gin.H{"error": cause.Error(), "sandbox_id": newID})
+	}
 	if err := agent.WriteFile(c, newID, "/tmp/artifacts.tar", 0o600, tarBytes); err != nil {
-		abortErr(c, http.StatusInternalServerError, err)
+		seedFail(fmt.Errorf("write artifacts tar: %w", err))
 		return
 	}
 	ex, err := agent.Exec(c, newID, &guestapi.ExecRequest{
 		Cmd: "sh", Args: []string{"-c", "tar -xf /tmp/artifacts.tar -C / && rm /tmp/artifacts.tar"},
 	})
 	if err != nil || ex.ExitCode != 0 {
-		abortErr(c, http.StatusInternalServerError,
-			fmt.Errorf("untar artifacts: %v (exit=%d stderr=%s)", err, exitCodeOf(ex), stderrOf(ex)))
+		seedFail(fmt.Errorf("untar artifacts: %v (exit=%d stderr=%s)", err, exitCodeOf(ex), stderrOf(ex)))
 		return
 	}
 	row.State = st.State
@@ -824,6 +974,11 @@ func stderrOf(ex *guestapi.ExecResponse) string {
 	return string(ex.Stderr)
 }
 
+// maxArtifactsTar caps the decompressed RECYCLED remnant: the tar is
+// buffered in memory and shipped through guestd, so an oversized (or
+// corrupt) cold-store object must not absorb the whole process.
+const maxArtifactsTar = 1 << 30
+
 // readArtifactsTar fetches and zstd-decompresses the RECYCLED remnant.
 func readArtifactsTar(ctx context.Context, cold chunkstore.Objects, id string) ([]byte, error) {
 	rc, err := cold.GetObject(ctx, nodeagent.KeyArtifacts(id))
@@ -836,12 +991,20 @@ func readArtifactsTar(ctx context.Context, cold chunkstore.Objects, id string) (
 		return nil, err
 	}
 	defer zr.Close()
-	return io.ReadAll(zr)
+	data, err := io.ReadAll(io.LimitReader(zr, maxArtifactsTar+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxArtifactsTar {
+		return nil, fmt.Errorf("artifacts for %s exceed %d bytes decompressed", id, maxArtifactsTar)
+	}
+	return data, nil
 }
 
 func (s *Server) snapshotSandbox(c *gin.Context) {
 	id := c.Param("id")
-	if _, ok := s.ownedSandbox(c, id); !ok {
+	sb, ok := s.ownedSandbox(c, id)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -850,10 +1013,6 @@ func (s *Server) snapshotSandbox(c *gin.Context) {
 	_ = c.ShouldBindJSON(&body)
 	if body.Tag == "" {
 		body.Tag = "snap"
-	}
-	sb, ok := s.ownedSandbox(c, id)
-	if !ok {
-		return
 	}
 	agent, ok := s.agentOf(c, sb)
 	if !ok {
@@ -946,7 +1105,8 @@ func (s *Server) execSandbox(c *gin.Context) {
 }
 
 func (s *Server) readFile(c *gin.Context) {
-	if _, ok := s.ownedSandbox(c, c.Param("id")); !ok {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
 		return
 	}
 	path := c.Query("path")
@@ -954,15 +1114,11 @@ func (s *Server) readFile(c *gin.Context) {
 		abortErr(c, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	sbRf, okRf := s.ownedSandbox(c, c.Param("id"))
-	if !okRf {
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
 		return
 	}
-	agentRf, okRf := s.agentOf(c, sbRf)
-	if !okRf {
-		return
-	}
-	data, err := agentRf.ReadFile(c, c.Param("id"), path)
+	data, err := agent.ReadFile(c, sb.ID, path)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
@@ -971,7 +1127,8 @@ func (s *Server) readFile(c *gin.Context) {
 }
 
 func (s *Server) writeFile(c *gin.Context) {
-	if _, ok := s.ownedSandbox(c, c.Param("id")); !ok {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
 		return
 	}
 	path := c.Query("path")
@@ -979,29 +1136,26 @@ func (s *Server) writeFile(c *gin.Context) {
 		abortErr(c, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
-	mode := uint64(0o644)
+	mode := fs.FileMode(0o644)
 	if raw := c.Query("mode"); raw != "" {
 		parsed, err := strconv.ParseUint(raw, 8, 32)
 		if err != nil {
 			abortErr(c, http.StatusBadRequest, errors.New("mode must be octal"))
 			return
 		}
-		mode = parsed
+		// Permission bits only: no setuid/setgid/sticky smuggled into the guest.
+		mode = fs.FileMode(parsed) & fs.ModePerm
 	}
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	sbWf, okWf := s.ownedSandbox(c, c.Param("id"))
-	if !okWf {
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
 		return
 	}
-	agentWf, okWf := s.agentOf(c, sbWf)
-	if !okWf {
-		return
-	}
-	if err := agentWf.WriteFile(c, c.Param("id"), path, fs.FileMode(mode), data); err != nil {
+	if err := agent.WriteFile(c, sb.ID, path, mode, data); err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}

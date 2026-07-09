@@ -8,12 +8,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/embervm/embervm/pkg/chunkstore"
 	"github.com/embervm/embervm/pkg/controlplane"
@@ -32,7 +36,11 @@ func main() {
 	)
 	flag.Parse()
 
-	ctx := context.Background()
+	// SIGTERM/SIGINT cancel this context: the scheduler and lifecycle
+	// engine wind down and the HTTP server drains instead of dying
+	// mid-request.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	store, err := controlplane.NewStore(ctx, *dbURL)
 	if err != nil {
 		log.Fatalf("apiserver: connect database: %v", err)
@@ -97,7 +105,20 @@ func main() {
 	}
 	engine := controlplane.NewEngine(store, resolver, l1, cold, engCfg)
 	go engine.Run(ctx)
-	if err := http.ListenAndServe(*listen, srv.Handler()); err != nil {
+	httpSrv := &http.Server{
+		Addr:    *listen,
+		Handler: srv.Handler(),
+		// Header-read bound only: response writes stream indefinitely (the
+		// guest proxy carries WebSockets), so no global WriteTimeout.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		<-ctx.Done()
+		shCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shCtx)
+	}()
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("apiserver: serve: %v", err)
 	}
 }

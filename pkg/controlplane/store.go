@@ -597,9 +597,13 @@ type Usage struct {
 // bin-packing constraints; PostgreSQL is the single source of truth for
 // placement).
 func (s *Store) NodeUsage(ctx context.Context) (map[string]Usage, error) {
+	// PENDING (with a node already assigned) counts: a create between
+	// SetSandboxNode and RUNNING is memory the node is about to spend;
+	// excluding it lets concurrent placements all read the same free budget
+	// and overshoot even the oversold ceiling.
 	rows, err := s.pool.Query(ctx,
 		`SELECT node_id, COALESCE(SUM(memory_mib),0), COALESCE(SUM(vcpus),0) FROM sandboxes
-		 WHERE state IN ('STARTING','RUNNING','RESUMING','PAUSING') AND node_id <> ''
+		 WHERE state IN ('PENDING','STARTING','RUNNING','RESUMING','PAUSING') AND node_id <> ''
 		 GROUP BY node_id`)
 	if err != nil {
 		return nil, err

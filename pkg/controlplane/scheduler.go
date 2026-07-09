@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/embervm/embervm/pkg/metrics"
@@ -133,45 +134,57 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// pollOnce health-checks every registered node, updating liveness and
-// evicting nodes past the miss threshold. Split out for tests.
+// pollOnce health-checks every registered node concurrently, updating
+// liveness and evicting nodes past the miss threshold. Concurrent + per-node
+// error isolation on purpose: sequential polling of unreachable nodes (3s
+// timeout each) could exceed the poll interval, and one node's store blip
+// must not skip the health verdict of every node after it. Split out for
+// tests.
 func (s *Scheduler) pollOnce(ctx context.Context) error {
-	up := 0
-	defer func() { metrics.NodesUp.Set(float64(up)) }()
+	var up atomic.Int64
+	defer func() { metrics.NodesUp.Set(float64(up.Load())) }()
+	var wg sync.WaitGroup
 	for _, id := range s.registry.IDs() {
-		agent, err := s.registry.Agent(id)
-		if err != nil {
-			return err
-		}
-		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		h, err := agent.Healthz(hctx)
-		cancel()
-		if err != nil {
-			s.recordMiss(ctx, id, err)
-			continue
-		}
-		up++
-		s.mu.Lock()
-		s.misses[id] = 0
-		s.mu.Unlock()
-		if err := s.store.TouchNode(ctx, id); err != nil {
-			return err
-		}
-		for _, f := range h.FailedSandboxes {
-			sbID, cause, _ := strings.Cut(f, ": ")
-			if err := s.store.FailSandbox(ctx, sbID, "watchdog: "+cause); err != nil {
-				log.Printf("scheduler: record watchdog failure %s: %v", sbID, err)
-			} else {
-				log.Printf("scheduler: node %s watchdog reaped %s (%s)", id, sbID, cause)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			agent, err := s.registry.Agent(id)
+			if err != nil {
+				log.Printf("scheduler: resolve node %s: %v", id, err)
+				return
 			}
-		}
-		if h.CapacityMiB > 0 || h.CPUCores > 0 {
-			if err := s.store.UpsertNode(ctx, Node{ID: id, CapacityMiB: h.CapacityMiB, CPUCores: h.CPUCores}); err != nil {
-				return err
+			hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			h, err := agent.Healthz(hctx)
+			cancel()
+			if err != nil {
+				s.recordMiss(ctx, id, err)
+				return
 			}
-			_ = s.store.TouchNode(ctx, id) // upsert resets state; re-stamp
-		}
+			up.Add(1)
+			s.mu.Lock()
+			s.misses[id] = 0
+			s.mu.Unlock()
+			if err := s.store.TouchNode(ctx, id); err != nil {
+				log.Printf("scheduler: touch node %s: %v", id, err)
+			}
+			for _, f := range h.FailedSandboxes {
+				sbID, cause, _ := strings.Cut(f, ": ")
+				if err := s.store.FailSandbox(ctx, sbID, "watchdog: "+cause); err != nil {
+					log.Printf("scheduler: record watchdog failure %s: %v", sbID, err)
+				} else {
+					log.Printf("scheduler: node %s watchdog reaped %s (%s)", id, sbID, cause)
+				}
+			}
+			if h.CapacityMiB > 0 || h.CPUCores > 0 {
+				if err := s.store.UpsertNode(ctx, Node{ID: id, CapacityMiB: h.CapacityMiB, CPUCores: h.CPUCores}); err != nil {
+					log.Printf("scheduler: upsert node %s: %v", id, err)
+					return
+				}
+				_ = s.store.TouchNode(ctx, id) // upsert resets state; re-stamp
+			}
+		}()
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -181,19 +194,31 @@ func (s *Scheduler) recordMiss(ctx context.Context, id string, cause error) {
 	n := s.misses[id]
 	s.mu.Unlock()
 	log.Printf("scheduler: node %s health poll failed (%d/%d): %v", id, n, s.cfg.MissThreshold, cause)
-	if n < s.cfg.MissThreshold {
+	if n != s.cfg.MissThreshold {
+		// Below: not yet. Above: already evicted — re-running the eviction
+		// every poll would spam SetNodeState + 0-row FailRunningOnNode and
+		// log a misleading "evicted; 0 sandboxes" line each tick.
 		return
 	}
 	// Eviction: the node is gone. Its active sandboxes become FAILED —
 	// their last write-through snapshot restores on demand elsewhere;
 	// paused/archived ones already live in L1/L2 and need nothing.
+	// On a store error, rewind the counter so the next miss retries the
+	// eviction instead of silently never marking the node down.
+	retry := func() {
+		s.mu.Lock()
+		s.misses[id] = s.cfg.MissThreshold - 1
+		s.mu.Unlock()
+	}
 	if err := s.store.SetNodeState(ctx, id, "down"); err != nil {
 		log.Printf("scheduler: mark node %s down: %v", id, err)
+		retry()
 		return
 	}
 	failed, err := s.store.FailRunningOnNode(ctx, id, "node "+id+" evicted (missed heartbeats)")
 	if err != nil {
 		log.Printf("scheduler: fail sandboxes on %s: %v", id, err)
+		retry()
 		return
 	}
 	log.Printf("scheduler: node %s evicted; %d active sandboxes marked FAILED (restorable from L1)", id, failed)
