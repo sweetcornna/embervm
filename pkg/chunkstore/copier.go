@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -33,7 +34,19 @@ func (c Copier) Copy(ctx context.Context, hashes []string) (int, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(par)
 	copied := make(chan int, len(hashes))
+	// A manifest can reference one content hash at MANY chunk indices
+	// (repeated memory pages), so the list carries duplicates. Launching
+	// them all races the same key against itself — concurrent Put+Touch of
+	// one object makes MinIO's self-copy transiently observe NoSuchKey —
+	// and is wasted round-trips besides. One transfer per distinct hash.
+	seen := make(map[string]struct{}, len(hashes))
+	unique := 0
 	for _, hash := range hashes {
+		if _, dup := seen[hash]; dup {
+			continue
+		}
+		seen[hash] = struct{}{}
+		unique++
 		g.Go(func() error {
 			ok, err := c.Dst.Has(ctx, hash)
 			if err != nil {
@@ -45,12 +58,22 @@ func (c Copier) Copy(ctx context.Context, hashes []string) (int, error) {
 				// lands only after Copy returns. Refresh the chunk's GC
 				// clock or a concurrent sweep could delete it before the
 				// manifest becomes a mark root (gc.go safety argument).
-				if toucher, can := c.Dst.(Toucher); can {
-					if err := toucher.TouchChunk(ctx, hash); err != nil {
-						return fmt.Errorf("touch chunk %s: %w", hash, err)
-					}
+				toucher, can := c.Dst.(Toucher)
+				if !can {
+					return nil
 				}
-				return nil
+				err := toucher.TouchChunk(ctx, hash)
+				if err == nil {
+					return nil
+				}
+				if !errors.Is(err, ErrNotFound) {
+					return fmt.Errorf("touch chunk %s: %w", hash, err)
+				}
+				// Gone between Has and Touch: a GC sweep we lost to, or a
+				// concurrent writer overwriting the same immutable content
+				// (another sandbox's pause). Fall through and upload — a
+				// double PUT of identical bytes is safe and leaves exactly
+				// the fresh mtime the touch wanted.
 			}
 			rc, err := c.Src.Get(ctx, hash)
 			if err != nil {
@@ -78,7 +101,7 @@ func (c Copier) Copy(ctx context.Context, hashes []string) (int, error) {
 		n++
 	}
 	metrics.ChunkOps.WithLabelValues("put").Add(float64(n))
-	metrics.ChunkOps.WithLabelValues("dedup_hit").Add(float64(len(hashes) - n))
+	metrics.ChunkOps.WithLabelValues("dedup_hit").Add(float64(unique - n))
 	return n, nil
 }
 

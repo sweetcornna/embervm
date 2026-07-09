@@ -125,7 +125,7 @@ func (d *Dir) Put(ctx context.Context, hash string, r io.Reader, size int64) (bo
 // TouchChunk refreshes a chunk's modification time — its GC clock. The
 // pause write-through touches dedup hits so the GC grace window covers
 // chunks a new manifest re-references, not only chunks it uploads (the
-// gc.go safety argument).
+// gc.go safety argument). A missing chunk surfaces as ErrNotFound.
 func (d *Dir) TouchChunk(ctx context.Context, hash string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -135,7 +135,13 @@ func (d *Dir) TouchChunk(ctx context.Context, hash string) error {
 		return err
 	}
 	now := time.Now()
-	return os.Chtimes(path, now, now)
+	if err := os.Chtimes(path, now, now); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("chunk %s: touch: %w", hash, ErrNotFound)
+		}
+		return err
+	}
+	return nil
 }
 
 // StatChunk returns a chunk's current ChunkInfo — GC's delete-time re-check.

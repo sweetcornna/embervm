@@ -176,6 +176,8 @@ func (s *S3) putRetrying(ctx context.Context, key string, r io.Reader, size int6
 
 // TouchChunk refreshes the chunk's LastModified — its GC clock — via a
 // self-copy with a metadata REPLACE directive (see Copier: dedup hits).
+// A missing key surfaces as ErrNotFound: the caller decides whether that
+// means "re-upload" (Copier) or a genuine hole.
 func (s *S3) TouchChunk(ctx context.Context, hash string) error {
 	key := s.chunkKey(hash)
 	return retryS3(ctx, func() error {
@@ -187,6 +189,9 @@ func (s *S3) TouchChunk(ctx context.Context, hash string) error {
 			},
 			minio.CopySrcOptions{Bucket: s.cfg.Bucket, Object: key})
 		if err != nil {
+			if notFound(err) {
+				return fmt.Errorf("chunk %s: touch: %w", hash, ErrNotFound)
+			}
 			return fmt.Errorf("chunk %s: touch: %w", hash, err)
 		}
 		return nil
