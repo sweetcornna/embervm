@@ -35,6 +35,15 @@ type SnapshotDescriptor struct {
 	// It rides the descriptor so a "none" sandbox cannot regain internet by
 	// being tiered out and restored on another node.
 	Egress string `json:"egress,omitempty"`
+	// M6 runtime resize (additive). MemoryMiB above is the CURRENT effective
+	// size; BaseMemoryMiB is the boot mem_size_mib the hotplug region sits on
+	// top of, and MaxMemoryMiB/MaxVCPUs are the resize ceilings. Old
+	// descriptors read as 0 = fixed geometry. The virtio-mem plug state
+	// itself rides the Firecracker snapfile; these fields let the restoring
+	// node re-derive cgroup bounds and future resize targets.
+	BaseMemoryMiB int `json:"base_memory_mib,omitempty"`
+	MaxMemoryMiB  int `json:"max_memory_mib,omitempty"`
+	MaxVCPUs      int `json:"max_vcpus,omitempty"`
 }
 
 // DiskOrigin names a sandbox-snapshot clone base.

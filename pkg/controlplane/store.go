@@ -64,6 +64,18 @@ type Sandbox struct {
 	// was forked from and the checkpoint tag it branched at.
 	ParentID   string `json:"parent_id,omitempty"`
 	ForkedFrom string `json:"forked_from,omitempty"`
+	// M6 runtime resize ceilings. MemoryMiB/VCPUs above are the CURRENT
+	// effective values (they move with resize and drive NodeUsage
+	// accounting); these are the immutable bounds declared at create.
+	// 0 = fixed geometry.
+	MaxMemoryMiB int `json:"max_memory_mib,omitempty"`
+	MaxVCPUs     int `json:"max_vcpus,omitempty"`
+	// BaseMemoryMiB/BaseVCPUs are the create-time floors (boot geometry) a
+	// resize can shrink back to; Autoscale opts into the engine's
+	// pressure-driven resize loop.
+	BaseMemoryMiB int  `json:"base_memory_mib,omitempty"`
+	BaseVCPUs     int  `json:"base_vcpus,omitempty"`
+	Autoscale     bool `json:"autoscale,omitempty"`
 }
 
 // Store is the PostgreSQL-backed persistence layer.
@@ -305,14 +317,15 @@ func (s *Store) CreateSandbox(ctx context.Context, sb Sandbox) (Sandbox, error) 
 		sb.ArtifactPaths = []string{}
 	}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandboxes (id,template_id,state,vcpus,memory_mib,data_disk_gib,owner,artifact_paths,parent_id,forked_from)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::uuid,NULLIF($10,''))
+		`INSERT INTO sandboxes (id,template_id,state,vcpus,memory_mib,data_disk_gib,owner,artifact_paths,parent_id,forked_from,max_memory_mib,max_vcpus,base_memory_mib,base_vcpus,autoscale)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,'')::uuid,NULLIF($10,''),$11,$12,$13,$14,$15)
 		 RETURNING `+sandboxCols,
 		sb.ID, sb.TemplateID, sb.State, sb.VCPUs, sb.MemoryMiB, sb.DataDiskGiB, sb.Owner, sb.ArtifactPaths,
-		sb.ParentID, sb.ForkedFrom).
+		sb.ParentID, sb.ForkedFrom, sb.MaxMemoryMiB, sb.MaxVCPUs, sb.BaseMemoryMiB, sb.BaseVCPUs, sb.Autoscale).
 		Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom)
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom,
+			&sb.MaxMemoryMiB, &sb.MaxVCPUs, &sb.BaseMemoryMiB, &sb.BaseVCPUs, &sb.Autoscale)
 	return sb, err
 }
 
@@ -320,14 +333,15 @@ func scanSandbox(row pgx.Row) (Sandbox, error) {
 	var sb Sandbox
 	err := row.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 		&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-		&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom)
+		&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom,
+		&sb.MaxMemoryMiB, &sb.MaxVCPUs, &sb.BaseMemoryMiB, &sb.BaseVCPUs, &sb.Autoscale)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
 	return sb, err
 }
 
-const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at,node_id,COALESCE(parent_id::text,''),COALESCE(forked_from,'')`
+const sandboxCols = `id,template_id,state,vcpus,memory_mib,data_disk_gib,netns,owner,error,created_at,updated_at,paused_at,artifact_paths,prewarmed_at,node_id,COALESCE(parent_id::text,''),COALESCE(forked_from,''),max_memory_mib,max_vcpus,base_memory_mib,base_vcpus,autoscale`
 
 // GetSandbox fetches a sandbox by id.
 func (s *Store) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
@@ -370,7 +384,8 @@ func (s *Store) ListSandboxes(ctx context.Context, owner, state string) ([]Sandb
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom); err != nil {
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom,
+			&sb.MaxMemoryMiB, &sb.MaxVCPUs, &sb.BaseMemoryMiB, &sb.BaseVCPUs, &sb.Autoscale); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)
@@ -467,7 +482,8 @@ func (s *Store) ListTransitionDue(ctx context.Context, state string, before time
 		var sb Sandbox
 		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
 			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
-			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom); err != nil {
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom,
+			&sb.MaxMemoryMiB, &sb.MaxVCPUs, &sb.BaseMemoryMiB, &sb.BaseVCPUs, &sb.Autoscale); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)
@@ -523,6 +539,44 @@ func (s *Store) SetPrewarmedAt(ctx context.Context, id string, at *time.Time) er
 // SetSandboxNode records placement.
 func (s *Store) SetSandboxNode(ctx context.Context, id, nodeID string) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE sandboxes SET node_id=$2, updated_at=now() WHERE id=$1`, id, nodeID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListAutoscaleRunning returns the RUNNING sandboxes opted into the
+// engine's pressure-driven resize loop (M6).
+func (s *Store) ListAutoscaleRunning(ctx context.Context) ([]Sandbox, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+sandboxCols+` FROM sandboxes WHERE state='RUNNING' AND autoscale ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Sandbox
+	for rows.Next() {
+		var sb Sandbox
+		if err := rows.Scan(&sb.ID, &sb.TemplateID, &sb.State, &sb.VCPUs, &sb.MemoryMiB, &sb.DataDiskGiB,
+			&sb.Netns, &sb.Owner, &sb.Error, &sb.CreatedAt, &sb.UpdatedAt, &sb.PausedAt,
+			&sb.ArtifactPaths, &sb.PrewarmedAt, &sb.NodeID, &sb.ParentID, &sb.ForkedFrom,
+			&sb.MaxMemoryMiB, &sb.MaxVCPUs, &sb.BaseMemoryMiB, &sb.BaseVCPUs, &sb.Autoscale); err != nil {
+			return nil, err
+		}
+		out = append(out, sb)
+	}
+	return out, rows.Err()
+}
+
+// UpdateSandboxGeometry records the achieved effective geometry after a
+// resize or a restore-time reconciliation (M6). NodeUsage sums these columns,
+// so this write IS the scheduler's accounting update.
+func (s *Store) UpdateSandboxGeometry(ctx context.Context, id string, vcpus, memoryMiB int) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandboxes SET vcpus=$2, memory_mib=$3, updated_at=now() WHERE id=$1`, id, vcpus, memoryMiB)
 	if err != nil {
 		return err
 	}

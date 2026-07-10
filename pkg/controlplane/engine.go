@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/embervm/embervm/pkg/chunkstore"
@@ -57,6 +58,14 @@ type EngineConfig struct {
 	TTLRecycle  time.Duration // ARCHIVED_COLD   → RECYCLED
 	PrewarmLead time.Duration // pull-back lead before a predicted wake; default 60s
 	GCGrace     time.Duration // chunk-GC grace window; default 1h
+	// M6 autoscale (pressure-driven resize of opted-in sandboxes).
+	AutoscaleStepMiB  int           // memory step per action; default 256
+	AutoscaleCooldown time.Duration // quiet period after any action; default 30s
+	// Grow/shrink trigger points as MemAvailable % of MemTotal; defaults
+	// 10 / 50. Gates tune them so real guests need not be squeezed to the
+	// brink of the OOM killer to exercise the loop.
+	AutoscaleGrowAvailPct   float64
+	AutoscaleShrinkAvailPct float64
 }
 
 // EngineConfigFromEnv reads EMBERVM_TTL_WARM / EMBERVM_TTL_COLD /
@@ -76,6 +85,7 @@ func EngineConfigFromEnv() (EngineConfig, error) {
 		{"EMBERVM_TTL_RECYCLE", &cfg.TTLRecycle},
 		{"EMBERVM_PREWARM_LEAD", &cfg.PrewarmLead},
 		{"EMBERVM_GC_GRACE", &cfg.GCGrace},
+		{"EMBERVM_AUTOSCALE_COOLDOWN", &cfg.AutoscaleCooldown},
 	} {
 		v := os.Getenv(f.env)
 		if v == "" {
@@ -86,6 +96,13 @@ func EngineConfigFromEnv() (EngineConfig, error) {
 			return cfg, fmt.Errorf("bad %s %q: %w", f.env, v, err)
 		}
 		*f.dst = d
+	}
+	if v := os.Getenv("EMBERVM_AUTOSCALE_STEP_MIB"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return cfg, fmt.Errorf("bad EMBERVM_AUTOSCALE_STEP_MIB %q", v)
+		}
+		cfg.AutoscaleStepMiB = n
 	}
 	return cfg, nil
 }
@@ -99,6 +116,18 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	}
 	if c.GCGrace <= 0 {
 		c.GCGrace = time.Hour
+	}
+	if c.AutoscaleStepMiB <= 0 {
+		c.AutoscaleStepMiB = 256
+	}
+	if c.AutoscaleCooldown <= 0 {
+		c.AutoscaleCooldown = 30 * time.Second
+	}
+	if c.AutoscaleGrowAvailPct <= 0 {
+		c.AutoscaleGrowAvailPct = 10
+	}
+	if c.AutoscaleShrinkAvailPct <= 0 {
+		c.AutoscaleShrinkAvailPct = 50
 	}
 	return c
 }
@@ -121,6 +150,12 @@ type Engine struct {
 	l1       chunkstore.ListingBackend // warm object store (nil disables COLD/RECYCLE)
 	cold     chunkstore.ListingBackend // cold object store (nil disables COLD/RECYCLE)
 	cfg      EngineConfig
+
+	// CanFit, when set, admission-checks autoscale growth against the
+	// node's oversold budget (Scheduler.CanFit); nil skips the check (M6).
+	CanFit func(ctx context.Context, nodeID string, memDeltaMiB, vcpuDelta int) error
+
+	scale map[string]*scaleState // per-sandbox autoscale hysteresis (M6)
 }
 
 // NewEngine wires the lifecycle engine. l1/cold may be nil: WARM demotion
@@ -165,6 +200,9 @@ func (e *Engine) tickOnce(ctx context.Context) error {
 		}
 	}
 	if err := e.prewarmScan(ctx); err != nil {
+		return err
+	}
+	if err := e.autoscaleScan(ctx); err != nil {
 		return err
 	}
 	return nil

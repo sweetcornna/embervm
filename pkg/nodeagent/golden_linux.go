@@ -35,6 +35,12 @@ type goldenMeta struct {
 	VCPUs       int    `json:"vcpus"`
 	MemoryMiB   int    `json:"memory_mib"`
 	DataDiskGiB int    `json:"data_disk_gib"`
+	// M6: the hotplug region is part of the snapshot, so it is part of the
+	// geometry. Goldens are built with fixed geometry (Max == base); a
+	// resize-enabled create must miss and cold-boot. Old golden.json reads
+	// as 0 and is normalized to the base on load.
+	MaxMemoryMiB int `json:"max_memory_mib,omitempty"`
+	MaxVCPUs     int `json:"max_vcpus,omitempty"`
 }
 
 // keyGolden is the L1 object recording a template's golden snapshot.
@@ -64,6 +70,8 @@ func (a *Agent) buildGolden(ctx context.Context, templateID string) error {
 		MemoryMiB:   a.cfg.GoldenMemoryMiB,
 		DataDiskGiB: max(a.cfg.GoldenDataDiskGiB, 1),
 	}
+	// Fixed geometry: no hotplug region in the golden snapshot (M6).
+	meta.MaxMemoryMiB, meta.MaxVCPUs = meta.MemoryMiB, meta.VCPUs
 	if _, err := a.CreateSandbox(ctx, nodeapi.CreateSandboxRequest{
 		SandboxID: gid, TemplateID: templateID,
 		VCPUs: meta.VCPUs, MemoryMiB: meta.MemoryMiB, DataDiskGiB: meta.DataDiskGiB,
@@ -120,8 +128,16 @@ func (a *Agent) goldenFor(ctx context.Context, templateID string, req nodeapi.Cr
 			return goldenMeta{}, false
 		}
 	}
-	if req.VCPUs != meta.VCPUs || req.MemoryMiB != meta.MemoryMiB || req.DataDiskGiB != meta.DataDiskGiB {
-		return goldenMeta{}, false // geometry mismatch: cold boot
+	// Pre-M6 golden.json has no ceilings: fixed geometry.
+	if meta.MaxMemoryMiB < meta.MemoryMiB {
+		meta.MaxMemoryMiB = meta.MemoryMiB
+	}
+	if meta.MaxVCPUs < meta.VCPUs {
+		meta.MaxVCPUs = meta.VCPUs
+	}
+	if req.VCPUs != meta.VCPUs || req.MemoryMiB != meta.MemoryMiB || req.DataDiskGiB != meta.DataDiskGiB ||
+		req.MaxMemoryMiB != meta.MaxMemoryMiB || req.MaxVCPUs != meta.MaxVCPUs {
+		return goldenMeta{}, false // geometry (incl. hotplug region) mismatch: cold boot
 	}
 	// The golden dataset snapshot must exist locally to clone from.
 	gsb := &sandbox{id: meta.SandboxID, dir: filepath.Join(a.cfg.WorkDir, meta.SandboxID)}
@@ -142,6 +158,9 @@ func (a *Agent) fastCreate(ctx context.Context, req nodeapi.CreateSandboxRequest
 		templateID:  req.TemplateID,
 		vcpus:       meta.VCPUs,
 		memMiB:      meta.MemoryMiB,
+		baseMemMiB:  meta.MemoryMiB,
+		maxMemMiB:   meta.MaxMemoryMiB,
+		maxVCPUs:    meta.MaxVCPUs,
 		dataDiskGiB: meta.DataDiskGiB,
 		egress:      req.Egress,
 	})

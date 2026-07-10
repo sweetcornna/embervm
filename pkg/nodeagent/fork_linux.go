@@ -37,7 +37,10 @@ type cloneSpec struct {
 	layers      []string // manifest chain, root first: ["p1", ..., "pN"]
 	templateID  string
 	vcpus       int
-	memMiB      int
+	memMiB      int // source's effective memory at the checkpoint (M6)
+	baseMemMiB  int // source's boot memory; 0 = fixed geometry (== memMiB)
+	maxMemMiB   int // source's hotplug ceiling; the region rides the snapfile
+	maxVCPUs    int
 	dataDiskGiB int
 	egress      string
 }
@@ -107,6 +110,9 @@ func (a *Agent) cloneRestore(ctx context.Context, spec cloneSpec) (nodeapi.Sandb
 		dir:         filepath.Join(a.cfg.WorkDir, spec.newID),
 		vcpus:       spec.vcpus,
 		memMiB:      spec.memMiB,
+		baseMemMiB:  spec.baseMemMiB,
+		maxMemMiB:   spec.maxMemMiB,
+		maxVCPUs:    spec.maxVCPUs,
 		rootfs:      paths.RootfsExt4,
 		dataRaw:     paths.DataRaw,
 		templateID:  spec.templateID,
@@ -116,6 +122,16 @@ func (a *Agent) cloneRestore(ctx context.Context, spec cloneSpec) (nodeapi.Sandb
 		snapCount:   seq, // the chain continues above the checkpoint
 		snapLayer:   last,
 		diskOrigin:  &DiskOrigin{SandboxID: spec.srcID, Tag: last},
+	}
+	// Fixed geometry when the spec carries no M6 ceilings.
+	if sb.baseMemMiB == 0 {
+		sb.baseMemMiB = sb.memMiB
+	}
+	if sb.maxMemMiB < sb.baseMemMiB {
+		sb.maxMemMiB = sb.baseMemMiB
+	}
+	if sb.maxVCPUs < sb.vcpus {
+		sb.maxVCPUs = sb.vcpus
 	}
 	if err := os.MkdirAll(sb.snapDir(), 0o755); err != nil {
 		a.cleanup(ctx, sb)
@@ -202,6 +218,9 @@ func (a *Agent) Fork(ctx context.Context, parentID, layer, newID string) (nodeap
 		templateID:  parent.templateID,
 		vcpus:       parent.vcpus,
 		memMiB:      parent.memMiB,
+		baseMemMiB:  parent.baseMemMiB,
+		maxMemMiB:   parent.maxMemMiB,
+		maxVCPUs:    parent.maxVCPUs,
 		dataDiskGiB: parent.dataDiskGiB,
 		egress:      parent.egress,
 	})

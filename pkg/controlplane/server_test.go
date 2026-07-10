@@ -20,11 +20,12 @@ import (
 
 // cpMockAgent is a nodeapi.Agent that records calls for the handler tests.
 type cpMockAgent struct {
-	buildErr  error
-	createErr error
-	snapSeq   int
-	lastFork  struct{ parent, layer, newID string }
-	lastRB    struct{ id, layer string }
+	buildErr   error
+	createErr  error
+	snapSeq    int
+	lastFork   struct{ parent, layer, newID string }
+	lastRB     struct{ id, layer string }
+	lastResize nodeapi.ResizeRequest
 }
 
 func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
@@ -38,6 +39,10 @@ func (m *cpMockAgent) RestoreSandbox(_ context.Context, id, _ string) (nodeapi.S
 func (m *cpMockAgent) ExtractArtifacts(context.Context, string, []string) error { return nil }
 func (m *cpMockAgent) Prewarm(context.Context, string, string) error            { return nil }
 func (m *cpMockAgent) SetBalloon(context.Context, string, int) error            { return nil }
+func (m *cpMockAgent) ResizeSandbox(_ context.Context, id string, req nodeapi.ResizeRequest) (nodeapi.ResizeResult, error) {
+	m.lastResize = req
+	return nodeapi.ResizeResult{MemoryMiB: req.MemoryMiB, VCPUs: req.VCPUs}, nil
+}
 func (m *cpMockAgent) Fork(_ context.Context, parentID, layer, newID string) (nodeapi.SandboxStatus, error) {
 	m.lastFork = struct{ parent, layer, newID string }{parentID, layer, newID}
 	return nodeapi.SandboxStatus{SandboxID: newID, State: "RUNNING", Netns: "ember1"}, nil
@@ -167,6 +172,147 @@ func TestServerFullLifecycle(t *testing.T) {
 	// Kill.
 	if w := call(h, http.MethodDelete, "/v0/sandboxes/"+sb.ID, nil); w.Code != http.StatusNoContent {
 		t.Errorf("kill = %d: %s", w.Code, w.Body)
+	}
+}
+
+// TestServerResize walks the M6 resize verb: ceilings enforced at create,
+// happy path updates accounting, state and bound violations 409, empty body
+// 400, fixed-geometry sandboxes are not resizable.
+func TestServerResize(t *testing.T) {
+	agent := &cpMockAgent{}
+	h := newTestServer(t, agent)
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "alpine:3.20"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+
+	// Resizable sandbox: 256..1000 MiB (rounds up to 256+768=1024), 1..4 cpus.
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{
+		"template_id": tpl.ID, "vcpus": 1, "memory_mib": 256, "data_disk_gib": 1,
+		"max_memory_mib": 1000, "max_vcpus": 4,
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	if sb.MaxMemoryMiB != 1024 {
+		t.Errorf("stored ceiling = %d, want 1024 (slot-rounded from 1000)", sb.MaxMemoryMiB)
+	}
+
+	// Happy path.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resize", map[string]any{"memory_mib": 768, "vcpus": 2})
+	if w.Code != http.StatusOK {
+		t.Fatalf("resize = %d: %s", w.Code, w.Body)
+	}
+	var got Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if got.MemoryMiB != 768 || got.VCPUs != 2 {
+		t.Errorf("resized to %d MiB / %d cpus, want 768/2", got.MemoryMiB, got.VCPUs)
+	}
+	if agent.lastResize.MemoryMiB != 768 || agent.lastResize.VCPUs != 2 {
+		t.Errorf("agent saw %+v", agent.lastResize)
+	}
+	// Accounting persisted.
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID, nil)
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if got.MemoryMiB != 768 {
+		t.Errorf("persisted memory = %d, want 768", got.MemoryMiB)
+	}
+
+	// Over the ceiling → 409.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resize", map[string]any{"memory_mib": 2048}); w.Code != http.StatusConflict {
+		t.Errorf("over-ceiling resize = %d, want 409: %s", w.Code, w.Body)
+	}
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resize", map[string]any{"vcpus": 8}); w.Code != http.StatusConflict {
+		t.Errorf("over-ceiling cpu resize = %d, want 409: %s", w.Code, w.Body)
+	}
+	// Nothing to do → 400.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resize", map[string]any{}); w.Code != http.StatusBadRequest {
+		t.Errorf("empty resize = %d, want 400: %s", w.Code, w.Body)
+	}
+	// Wrong state → 409.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/pause", nil); w.Code != http.StatusOK {
+		t.Fatalf("pause = %d: %s", w.Code, w.Body)
+	}
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resize", map[string]any{"memory_mib": 512}); w.Code != http.StatusConflict {
+		t.Errorf("paused resize = %d, want 409: %s", w.Code, w.Body)
+	}
+
+	// Fixed-geometry sandbox cannot resize.
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID, "vcpus": 1, "memory_mib": 256, "data_disk_gib": 1})
+	var fixed Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &fixed)
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+fixed.ID+"/resize", map[string]any{"memory_mib": 512}); w.Code != http.StatusConflict {
+		t.Errorf("fixed-geometry resize = %d, want 409: %s", w.Code, w.Body)
+	}
+
+	// Ceiling without a base is a 400 at create.
+	if w := call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID, "max_memory_mib": 1024}); w.Code != http.StatusBadRequest {
+		t.Errorf("ceiling-without-base create = %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+// TestServerMigrate walks the M6 migrate verb on a two-node cluster: a
+// RUNNING sandbox moves and ends RUNNING on the target; explicit same-node
+// targets 409; a PAUSED_HOT sandbox just moves its placement (PAUSED_WARM).
+func TestServerMigrate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := testStore(t)
+	agents := map[string]nodeapi.Agent{"n1": &cpMockAgent{}, "n2": &cpMockAgent{}}
+	registry := NewRegistry(agents)
+	sched := NewScheduler(store, registry, SchedulerConfig{})
+	if err := sched.RegisterNodes(context.Background(),
+		map[string]string{"n1": "", "n2": ""}, map[string]int{"n1": 0, "n2": 0}); err != nil {
+		t.Fatal(err)
+	}
+	tokens := NewTokenStore(map[string]TokenInfo{"tok": {Owner: "alice", MaxSandboxes: 5}})
+	h := NewClusterServer(store, registry, sched, tokens, nil, nil).Handler()
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "alpine:3.20"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID, "vcpus": 1, "memory_mib": 256, "data_disk_gib": 1})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	src := sb.NodeID
+	if src == "" {
+		t.Fatal("sandbox has no placement")
+	}
+
+	// Explicit same-node target refuses.
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/migrate", map[string]string{"node_id": src}); w.Code != http.StatusConflict {
+		t.Errorf("same-node migrate = %d, want 409: %s", w.Code, w.Body)
+	}
+
+	// RUNNING migrate lands RUNNING elsewhere.
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/migrate", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("migrate = %d: %s", w.Code, w.Body)
+	}
+	var moved Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &moved)
+	if moved.NodeID == src || moved.NodeID == "" {
+		t.Errorf("migrate stayed on %q", moved.NodeID)
+	}
+	if moved.State != "RUNNING" {
+		t.Errorf("post-migrate state = %s, want RUNNING", moved.State)
+	}
+
+	// PAUSED_HOT migrate only moves the pointer (PAUSED_WARM).
+	if w := call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/pause", nil); w.Code != http.StatusOK {
+		t.Fatalf("pause = %d: %s", w.Code, w.Body)
+	}
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/migrate", map[string]string{"node_id": src})
+	if w.Code != http.StatusOK {
+		t.Fatalf("paused migrate = %d: %s", w.Code, w.Body)
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &moved)
+	if moved.NodeID != src || moved.State != "PAUSED_WARM" {
+		t.Errorf("paused migrate = node %s state %s, want %s/PAUSED_WARM", moved.NodeID, moved.State, src)
 	}
 }
 

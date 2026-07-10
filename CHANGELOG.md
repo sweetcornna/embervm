@@ -6,7 +6,71 @@ versions**, and every break is listed here (docs/zh/05 §4). Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [Unreleased] — Runtime elasticity (M6)
+
+A sandbox's resources stop being fixed at create: memory grows and shrinks
+at runtime through a virtio-mem hotplug region (real host reclaim,
+mprotect-hard), CPU moves within its boot ceiling through the cgroup
+`cpu.max` quota, an opted-in sandbox autoscales on guest-reported pressure,
+and an explicit verb migrates a RUNNING sandbox across nodes. Decisions:
+[ADR-0007](docs/adr/0007-m6-runtime-resize.md); base-technology comparison:
+docs/zh/07.
+
+### Added
+
+- **Resize ceilings at create** — `POST /v0/sandboxes` accepts
+  `max_memory_mib` / `max_vcpus` (0 = fixed geometry, fully opt-in). The
+  VM boots with a virtio-mem region of `max − base` (128 MiB slot-rounded,
+  starts unplugged and costs nothing) and `max_vcpus` cores clamped to
+  `vcpus` by the cgroup quota; boot args gain
+  `memhp_default_state=online_movable` so hot-UNplug actually reclaims.
+- **Resize verb** — `POST /v0/sandboxes/{id}/resize {memory_mib?, vcpus?}`
+  on a RUNNING sandbox: ceiling-validated, growth admission-checked
+  against the node's oversold budget (`Scheduler.CanFit`; 409 with options
+  when full — never a silent migration), guest-converged (shrink is
+  cooperative and reports the achieved size), cgroups updated, achieved
+  values written back to `sandboxes.memory_mib/vcpus`.
+- **Autoscale** — `"autoscale": true` at create opts into the lifecycle
+  engine's pressure loop: guestd `/healthz` now reports
+  MemTotal/MemAvailable + PSI avg10; hysteresis policy (grow on <10%
+  available or PSI>20 for 2 ticks, shrink toward the create-time base on
+  >50% for 10 ticks, 30s cooldown, CanFit-deferred growth), thresholds
+  config/env tunable (`EMBERVM_AUTOSCALE_*`).
+- **Migrate verb** — `POST /v0/sandboxes/{id}/migrate {node_id?}`:
+  RUNNING → pause (write-through) → release → warm-restore on the target
+  → RUNNING (~2.3s in CI-class virt); PAUSED_HOT just moves its placement
+  pointer (PAUSED_WARM). Default target excludes the current node
+  (`PlaceExcluding`); explicit targets are CanFit-checked.
+- **fcclient** — `PUT/PATCH/GET /hotplug/memory` wrappers; **uffd** —
+  contiguous Zero-chunk backfill coalesced into ≤64 MiB `UFFDIO_ZEROPAGE`
+  spans (a never-plugged region is not an ioctl storm); **metrics** —
+  `embervm_resize_seconds/_total`, `embervm_autoscale_actions_total`,
+  `embervm_migrations_total`.
+- **e2e-m6 workflow** — four `--- PASS:`-guarded gates:
+  `TestVirtioMemResizeKVM` (grow → dirty → shrink → chunked pause → uffd
+  restore → resize AGAIN → hot-unplug → second snapshot round-trip),
+  `TestResizeCPUQuotaKVM`, `TestAutoscaleMemoryKVM` (real tmpfs pressure
+  end-to-end through engine + PG), `TestMigrateRunningKVM` (two jailed
+  daemons).
+
+### Changed
+
+- **`sandboxes.memory_mib`/`vcpus` now mean CURRENT EFFECTIVE geometry**
+  (they move with resize/autoscale and restore-time reconciliation);
+  create-time values live in new `base_memory_mib`/`base_vcpus` columns
+  (migration 0006, additive/idempotent). `NodeUsage` accounting is
+  therefore live by construction.
+- `SandboxStatus` reports effective `memory_mib`/`vcpus`; resume, fork,
+  and rollback reconcile the PG row from it (a restore rewinds plug state
+  to the checkpoint's — the node re-reads `GET /hotplug/memory` after
+  every LoadSnapshot instead of trusting stale in-memory values).
+- Snapshot descriptors carry `base_memory_mib`/`max_memory_mib`/
+  `max_vcpus` (FormatVersion unchanged; old descriptors read as fixed
+  geometry). Golden fast-create matches on the ceilings too — goldens are
+  fixed-geometry, so resize-enabled creates cold-boot.
+- The per-sandbox cgroup enables the `cpu` controller alongside `memory`;
+  `memory.max` covers the declared ceiling (hard bound against a hostile
+  guest driver, per the upstream virtio-mem trust model).
 
 ## [v0.5.0-m5] — 2026-07-09 — Agent-native fork/branch/rollback (M5) — **v0.2**
 

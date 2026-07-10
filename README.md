@@ -60,6 +60,7 @@ English docs will be added incrementally with the code. The full research & desi
 | [04 创新与最佳实践](docs/zh/04-创新与最佳实践.md) | **Data-validated verdicts (authoritative on conflicts)** + frontier survey (REAP/FaaSnap/DeltaBox/Sabre…), 12 ranked innovations, latency budget model, host hardening checklist, reliability SOPs, tiered-archive economics |
 | [05 开源项目规划](docs/zh/05-开源项目规划.md) | Naming, AGPL-3.0 + CLA strategy, repo layout, versioning, governance, positioning vs E2B/Daytona |
 | [06 云服务器实测指南](docs/zh/06-云服务器实测指南.md) | Verified nested-virt matrix per provider, test topologies, single-node walkthrough, CI strategy with KVM on GitHub Actions |
+| [07 沙箱隔离方案深度对比](docs/zh/07-沙箱隔离方案深度对比.md) | Docker vs Firecracker head-to-head, 2026 isolation-tech & sandbox-cloud landscape, Cloud Hypervisor / gVisor challenger analysis — the runtime-elasticity verdict behind the M6 base decision |
 
 ## Roadmap
 
@@ -71,6 +72,7 @@ English docs will be added incrementally with the code. The full research & desi
 - [x] M3 (wk 11-13): tiered archive & lifecycle engine — TTL-driven HOT→WARM→COLD→RECYCLED, synthetic-full compaction + chunk GC, wake-histogram pre-warm, artifacts-only selective restore, per-sandbox cost report ([ADR-0004](docs/adr/0004-m3-archive-lifecycle.md); exit criteria — cold-archive restore <10s interactive, archive cost gate — validated on nested-virt CI)
 - [x] M4 (wk 14-16): elasticity & production hardening — multi-node scheduler (polled heartbeats, sticky/bin-pack placement, eviction + cross-node recovery), jailer-hardened Firecracker, golden fast-create (<500ms), 50 concurrent/node, WebSocket-transparent gateway proxy, netns egress policy, Prometheus metrics ([ADR-0005](docs/adr/0005-m4-elasticity-hardening.md); exit criteria — 3-node cluster survives kill -9 of any worker, G1–G6 accepted per [docs/acceptance-v0.1.md](docs/acceptance-v0.1.md) — validated on nested-virt CI) → **open-source v0.1**
 - [x] M5 (optional): agent-native fork/branch/rollback — checkpoints as first-class API, fork N parallel branches from any checkpoint (ZFS clone + shared content-addressed chunks = disk+memory CoW), in-place rollback, per-exec-step auto-checkpoints for time-travel replay ([ADR-0006](docs/adr/0006-m5-fork-branch.md); exit criteria — one sandbox forks 10 branches executing in parallel while the parent never stalls — validated on nested-virt CI)
+- [x] M6: runtime elasticity — per-sandbox memory resize at runtime via virtio-mem (grow AND shrink with real host reclaim, surviving chunked pause / uffd restore), CPU resize via cgroup quota within a boot-time core ceiling, pressure-driven autoscale (guest PSI/MemAvailable → lifecycle engine), and an explicit cross-node `migrate` verb ([ADR-0007](docs/adr/0007-m6-runtime-resize.md), base-technology comparison in [docs/zh/07](docs/zh/07-沙箱隔离方案深度对比.md); exit criteria — resize survives snapshot/restore both directions, autoscale grows/shrinks on real guest pressure, live migration of a RUNNING sandbox — validated on nested-virt CI)
 
 Realistic path to a chargeable beta: 4–6 months (the last 70% is network isolation, scheduling, and reliability hardening).
 

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"context"
@@ -68,13 +69,64 @@ func writeError(w http.ResponseWriter, status int, err error) {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, guestapi.HealthResponse{
+	h := guestapi.HealthResponse{
 		OK:      true,
 		Seq:     s.seq.Add(1),
 		PID:     os.Getpid(),
 		Version: s.version,
 		Resumes: s.resumes.Load(),
-	})
+	}
+	fillPressure(&h)
+	writeJSON(w, http.StatusOK, h)
+}
+
+// fillPressure reports the guest's memory/CPU pressure for the host's
+// autoscale engine (M6). Best-effort: a kernel without PSI, or a non-Linux
+// test build, just reports zeros and the engine skips the sandbox.
+func fillPressure(h *guestapi.HealthResponse) {
+	if raw, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			f := strings.Fields(line)
+			if len(f) < 2 {
+				continue
+			}
+			v, err := strconv.ParseUint(f[1], 10, 64)
+			if err != nil {
+				continue
+			}
+			switch f[0] {
+			case "MemTotal:":
+				h.MemTotalKiB = v
+			case "MemAvailable:":
+				h.MemAvailableKiB = v
+			}
+		}
+	}
+	h.PSIMemSome10 = psiSomeAvg10("/proc/pressure/memory")
+	h.PSICPUSome10 = psiSomeAvg10("/proc/pressure/cpu")
+}
+
+// psiSomeAvg10 parses the "some ... avg10=X.XX" line of a PSI file.
+func psiSomeAvg10(path string) float64 {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "some ") {
+			continue
+		}
+		for _, f := range strings.Fields(line) {
+			if v, ok := strings.CutPrefix(f, "avg10="); ok {
+				n, err := strconv.ParseFloat(v, 64)
+				if err != nil {
+					return 0
+				}
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // resumeHookPath is executed (best-effort) on every resume notification:

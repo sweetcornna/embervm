@@ -38,6 +38,7 @@ func NewServer(a Agent) http.Handler {
 	mux.HandleFunc("POST /sandboxes/{id}/extract-artifacts", s.extractArtifacts)
 	mux.HandleFunc("POST /sandboxes/{id}/prewarm", s.prewarm)
 	mux.HandleFunc("POST /sandboxes/{id}/balloon", s.setBalloon)
+	mux.HandleFunc("POST /sandboxes/{id}/resize", s.resizeSandbox)
 	mux.HandleFunc("POST /sandboxes/{id}/fork", s.fork)
 	mux.HandleFunc("POST /sandboxes/{id}/rollback", s.rollback)
 	mux.HandleFunc("POST /sandboxes/{id}/exec", s.exec)
@@ -276,6 +277,20 @@ func (s *server) setBalloon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *server) resizeSandbox(w http.ResponseWriter, r *http.Request) {
+	var req ResizeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, guestapi.ErrorResponse{Error: err.Error()})
+		return
+	}
+	res, err := s.agent.ResizeSandbox(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *server) fork(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +545,12 @@ var _ GuestProxier = (*Client)(nil)
 func (c *Client) SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error {
 	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/balloon", nil,
 		map[string]int{"target_mib": targetMiB}, nil)
+}
+
+func (c *Client) ResizeSandbox(ctx context.Context, sandboxID string, req ResizeRequest) (ResizeResult, error) {
+	var res ResizeResult
+	err := c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/resize", nil, req, &res)
+	return res, err
 }
 
 func (c *Client) Fork(ctx context.Context, parentID, layer, newID string) (SandboxStatus, error) {

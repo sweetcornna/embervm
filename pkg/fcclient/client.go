@@ -74,6 +74,27 @@ type Balloon struct {
 	DeflateOnOom bool `json:"deflate_on_oom"`
 }
 
+// MemoryHotplug is the body of PUT /hotplug/memory (pre-boot only): it
+// attaches a virtio-mem device whose region starts fully unplugged.
+// TotalSizeMiB must be a multiple of SlotSizeMiB; zero Block/Slot sizes let
+// Firecracker default them (2 MiB blocks, 128 MiB slots).
+type MemoryHotplug struct {
+	TotalSizeMiB int `json:"total_size_mib"`
+	BlockSizeMiB int `json:"block_size_mib,omitempty"`
+	SlotSizeMiB  int `json:"slot_size_mib,omitempty"`
+}
+
+// MemoryHotplugStatus is the response of GET /hotplug/memory. The guest
+// driver plugs/unplugs asynchronously: PluggedSizeMiB converges toward
+// RequestedSizeMiB only with guest cooperation, so callers poll.
+type MemoryHotplugStatus struct {
+	TotalSizeMiB     int `json:"total_size_mib"`
+	BlockSizeMiB     int `json:"block_size_mib"`
+	SlotSizeMiB      int `json:"slot_size_mib"`
+	PluggedSizeMiB   int `json:"plugged_size_mib"`
+	RequestedSizeMiB int `json:"requested_size_mib"`
+}
+
 // SnapshotCreate is the body of PUT /snapshot/create. SnapshotType defaults
 // to "Full" when empty.
 type SnapshotCreate struct {
@@ -131,6 +152,26 @@ func (c *Client) PatchBalloon(ctx context.Context, amountMib int) error {
 	return c.do(ctx, http.MethodPatch, "/balloon", map[string]int{"amount_mib": amountMib})
 }
 
+// PutMemoryHotplug attaches a virtio-mem hotplug region (pre-boot only; on
+// snapshot-restored VMs the region comes from the snapshot itself).
+func (c *Client) PutMemoryHotplug(ctx context.Context, m MemoryHotplug) error {
+	return c.do(ctx, http.MethodPut, "/hotplug/memory", m)
+}
+
+// PatchMemoryHotplug retargets the plugged size of the hotplug region on a
+// running VM. The guest driver converges asynchronously — poll
+// GetMemoryHotplug until PluggedSizeMiB matches.
+func (c *Client) PatchMemoryHotplug(ctx context.Context, requestedMiB int) error {
+	return c.do(ctx, http.MethodPatch, "/hotplug/memory", map[string]int{"requested_size_mib": requestedMiB})
+}
+
+// GetMemoryHotplug reports the hotplug region's plug state.
+func (c *Client) GetMemoryHotplug(ctx context.Context) (MemoryHotplugStatus, error) {
+	var st MemoryHotplugStatus
+	err := c.get(ctx, "/hotplug/memory", &st)
+	return st, err
+}
+
 // PatchVMState transitions a running VM, e.g. state="Paused" or "Resumed".
 func (c *Client) PatchVMState(ctx context.Context, state string) error {
 	return c.do(ctx, http.MethodPatch, "/vm", map[string]string{"state": state})
@@ -147,6 +188,24 @@ func (c *Client) CreateSnapshot(ctx context.Context, s SnapshotCreate) error {
 // LoadSnapshot restores (and optionally resumes) a VM from a snapshot.
 func (c *Client) LoadSnapshot(ctx context.Context, s SnapshotLoad) error {
 	return c.do(ctx, http.MethodPut, "/snapshot/load", s)
+}
+
+// get issues a GET and decodes the 200 JSON body into out.
+func (c *Client) get(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost"+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("firecracker GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return fmt.Errorf("firecracker GET %s: HTTP %d: %s", path, resp.StatusCode, raw)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) error {

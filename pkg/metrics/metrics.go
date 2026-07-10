@@ -63,6 +63,31 @@ var (
 		Name: "embervm_engine_tick_errors_total",
 		Help: "Lifecycle engine ticks that returned an error.",
 	})
+
+	// ResizeSeconds observes user-facing resize latency (M6).
+	ResizeSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "embervm_resize_seconds",
+		Help:    "Runtime resize latency, request to converged.",
+		Buckets: prometheus.ExponentialBuckets(0.01, 2, 12), // 10ms .. ~40s
+	})
+
+	// ResizeTotal counts resize outcomes (ok/no_capacity/error).
+	ResizeTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "embervm_resize_total",
+		Help: "Runtime resize requests, by outcome.",
+	}, []string{"result"})
+
+	// AutoscaleActions counts engine-driven automatic resizes (M6).
+	AutoscaleActions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "embervm_autoscale_actions_total",
+		Help: "Automatic elasticity actions, by direction (grow/shrink).",
+	}, []string{"direction"})
+
+	// Migrations counts explicit cross-node migrations (M6).
+	Migrations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "embervm_migrations_total",
+		Help: "Explicit sandbox migrations, by result.",
+	}, []string{"result"})
 )
 
 // Handler is the /metrics endpoint.

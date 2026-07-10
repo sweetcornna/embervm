@@ -26,6 +26,13 @@ type HealthResponse struct {
 	// Resumes counts POST /resumed notifications this process has seen —
 	// how many times the sandbox came back from a snapshot restore.
 	Resumes uint64 `json:"resumes"`
+	// Resource pressure (M6 autoscale signals; zero on guestd builds or
+	// kernels that cannot report them). MemTotal moves with virtio-mem
+	// resize; PSI values are /proc/pressure "some avg10" percentages.
+	MemTotalKiB     uint64  `json:"mem_total_kib,omitempty"`
+	MemAvailableKiB uint64  `json:"mem_available_kib,omitempty"`
+	PSIMemSome10    float64 `json:"psi_mem_some10,omitempty"`
+	PSICPUSome10    float64 `json:"psi_cpu_some10,omitempty"`
 }
 
 // ResumedResponse acknowledges a resume notification.

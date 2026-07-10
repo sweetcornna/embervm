@@ -23,6 +23,7 @@ type mockAgent struct {
 		data []byte
 	}
 	lastBalloon  int
+	lastResize   ResizeRequest
 	lastFork     struct{ parent, layer, newID string }
 	lastRollback string
 	failStop     bool
@@ -63,6 +64,10 @@ func (m *mockAgent) Prewarm(_ context.Context, id, tier string) error { return n
 func (m *mockAgent) SetBalloon(_ context.Context, id string, mib int) error {
 	m.lastBalloon = mib
 	return nil
+}
+func (m *mockAgent) ResizeSandbox(_ context.Context, id string, req ResizeRequest) (ResizeResult, error) {
+	m.lastResize = req
+	return ResizeResult{MemoryMiB: req.MemoryMiB, VCPUs: req.VCPUs}, nil
 }
 func (m *mockAgent) Fork(_ context.Context, parentID, layer, newID string) (SandboxStatus, error) {
 	m.lastFork = struct{ parent, layer, newID string }{parentID, layer, newID}

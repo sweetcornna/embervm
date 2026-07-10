@@ -226,12 +226,64 @@ func (s *Scheduler) recordMiss(ctx context.Context, id string, cause error) {
 	log.Printf("scheduler: node %s evicted; %d active sandboxes marked FAILED (restorable from L1)", id, failed)
 }
 
+// CanFit reports whether nodeID can absorb memDeltaMiB / vcpuDelta MORE
+// resources under the oversold budgets (M6 resize growth check). Non-
+// positive deltas always fit — shrink frees budget. The same PG usage truth
+// as Place; a resize that passes here can still lose a race with a
+// concurrent create, which the oversell slack absorbs (budgets are already
+// soft by design).
+func (s *Scheduler) CanFit(ctx context.Context, nodeID string, memDeltaMiB, vcpuDelta int) error {
+	if memDeltaMiB <= 0 && vcpuDelta <= 0 {
+		return nil
+	}
+	nodes, err := s.store.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	usage, err := s.store.NodeUsage(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range nodes {
+		if n.ID != nodeID {
+			continue
+		}
+		if n.State != "up" {
+			return fmt.Errorf("node %s is %s", nodeID, n.State)
+		}
+		if n.CapacityMiB > 0 && memDeltaMiB > 0 {
+			free := int(float64(n.CapacityMiB)*s.cfg.MemOvercommit) - usage[n.ID].MemMiB
+			if free < memDeltaMiB {
+				return fmt.Errorf("%w (node %s: %d MiB free, need %d more)", ErrNoCapacity, nodeID, free, memDeltaMiB)
+			}
+		}
+		if n.CPUCores > 0 && vcpuDelta > 0 {
+			free := int(float64(n.CPUCores)*s.cfg.CPUOvercommit) - usage[n.ID].VCPUs
+			if free < vcpuDelta {
+				return fmt.Errorf("%w (node %s: %d vcpus free, need %d more)", ErrNoCapacity, nodeID, free, vcpuDelta)
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown node %q", nodeID)
+}
+
 // Place picks a node for a sandbox needing memoryMiB and vcpus: the
 // previous node when it is up with room (L0 cache stickiness), else the up
 // node with the most free memory. Budgets are oversold per SchedulerConfig
 // (memory × MemOvercommit, cores × CPUOvercommit). PostgreSQL is the source
 // of truth for usage.
 func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB, vcpus int) (string, error) {
+	return s.place(ctx, previousNode, "", memoryMiB, vcpus)
+}
+
+// PlaceExcluding bin-packs like Place but never returns exclude — the M6
+// migrate verb's "anywhere but here".
+func (s *Scheduler) PlaceExcluding(ctx context.Context, exclude string, memoryMiB, vcpus int) (string, error) {
+	return s.place(ctx, "", exclude, memoryMiB, vcpus)
+}
+
+func (s *Scheduler) place(ctx context.Context, previousNode, exclude string, memoryMiB, vcpus int) (string, error) {
 	nodes, err := s.store.ListNodes(ctx)
 	if err != nil {
 		return "", err
@@ -261,7 +313,7 @@ func (s *Scheduler) Place(ctx context.Context, previousNode string, memoryMiB, v
 	var best string
 	bestFree := -1
 	for _, n := range nodes {
-		if n.State != "up" {
+		if n.State != "up" || n.ID == exclude {
 			continue
 		}
 		f, ok := fits(n)

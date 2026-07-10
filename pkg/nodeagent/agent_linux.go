@@ -40,13 +40,37 @@ const baseBootArgs = "console=ttyS0 reboot=k panic=1 pci=off " +
 // defaultExtraArgs is docs/zh/04 §5's microVM kernel command line.
 const defaultExtraArgs = "8250.nr_uarts=0 swiotlb=noforce"
 
+// hotplugSlotMiB is Firecracker's KVM slot granularity for the virtio-mem
+// region: total_size_mib must be a multiple of it (docs/memory-hotplug.md).
+const hotplugSlotMiB = 128
+
+// hotplugBootArgs makes the guest online hotplugged blocks automatically and
+// into ZONE_MOVABLE, so hot-UNplug can migrate pages away and actually hand
+// memory back to the host. The memmap_on_memory alternative avoids the ~1.6%
+// boot-memory memmap cost but makes unplug unreliable — reclaim is the whole
+// point of the M6 oversell story, so movable wins (ADR-0007).
+const hotplugBootArgs = "memhp_default_state=online_movable"
+
+// roundUpMiB rounds n up to the next multiple of q.
+func roundUpMiB(n, q int) int {
+	return (n + q - 1) / q * q
+}
+
+// hotplugTotalMiB is the size of sb's virtio-mem region (0 = none).
+func (sb *sandbox) hotplugTotalMiB() int {
+	return sb.maxMemMiB - sb.baseMemMiB
+}
+
 type sandbox struct {
 	id          string
 	machine     *lifecycle.Machine
 	lease       netns.Lease
 	dir         string
 	vcpus       int
-	memMiB      int
+	memMiB      int // current effective guest memory (base + plugged hotplug)
+	baseMemMiB  int // boot mem_size_mib; fixed for the VM's lifetime (M6)
+	maxMemMiB   int // hotplug ceiling; == baseMemMiB when no hotplug region (M6)
+	maxVCPUs    int // boot-time core count; == vcpus when CPU resize is off (M6)
 	rootfs      string
 	dataRaw     string
 	fc          *exec.Cmd
@@ -196,6 +220,18 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 	if req.DataDiskGiB == 0 {
 		req.DataDiskGiB = 15
 	}
+	// Normalize the resize ceilings once, here, so every downstream consumer
+	// (boot, cgroup, descriptor, resize verb) sees the same values: the
+	// hotplug region must be a multiple of the 128 MiB KVM slot, so the
+	// effective memory ceiling is base + rounded-up region.
+	if req.MaxMemoryMiB > req.MemoryMiB {
+		req.MaxMemoryMiB = req.MemoryMiB + roundUpMiB(req.MaxMemoryMiB-req.MemoryMiB, hotplugSlotMiB)
+	} else {
+		req.MaxMemoryMiB = req.MemoryMiB
+	}
+	if req.MaxVCPUs < req.VCPUs {
+		req.MaxVCPUs = req.VCPUs
+	}
 
 	if meta, ok := a.goldenFor(ctx, req.TemplateID, req); ok {
 		st, err := a.fastCreate(ctx, req, meta)
@@ -238,6 +274,9 @@ func (a *Agent) CreateSandbox(ctx context.Context, req nodeapi.CreateSandboxRequ
 		dir:         filepath.Join(a.cfg.WorkDir, req.SandboxID),
 		vcpus:       req.VCPUs,
 		memMiB:      req.MemoryMiB,
+		baseMemMiB:  req.MemoryMiB,
+		maxMemMiB:   req.MaxMemoryMiB,
+		maxVCPUs:    req.MaxVCPUs,
 		rootfs:      paths.RootfsExt4,
 		dataRaw:     paths.DataRaw,
 		templateID:  req.TemplateID,
@@ -315,7 +354,16 @@ func (a *Agent) launchFC(ctx context.Context, sb *sandbox, logName string) (stri
 	a.mu.Lock()
 	sb.fc = fc
 	a.mu.Unlock()
-	a.placeCgroup(sb.id, fc.Process.Pid, sb.memMiB)
+	// The cgroup memory ceiling covers the declared resize maximum, not the
+	// current effective size: hotplug growth must not trip memory.max
+	// mid-resize; the max is the hard bound against a hostile guest. The CPU
+	// quota clamps to the CURRENT effective vcpus — only when the VM booted
+	// with headroom cores (maxVCPUs > vcpus is meaningless without it).
+	quota := 0
+	if sb.maxVCPUs > sb.vcpus {
+		quota = sb.vcpus
+	}
+	a.placeCgroup(sb.id, fc.Process.Pid, max(sb.memMiB, sb.maxMemMiB), quota)
 	if err := waitSocketReady(ctx, apiSock, 10*time.Second); err != nil {
 		return "", err
 	}
@@ -339,10 +387,17 @@ func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
 	}
 	c := fcclient.New(apiSock)
 	bootArgs := baseBootArgs + " " + a.cfg.BootExtraArgs
+	if sb.hotplugTotalMiB() > 0 {
+		// Hotplugged blocks must land in ZONE_MOVABLE or unplug can never
+		// reclaim them (M6).
+		bootArgs += " " + hotplugBootArgs
+	}
 	steps := []func() error{
 		func() error {
+			// maxVCPUs cores at boot (Firecracker cannot hotplug them);
+			// launchFC's cpu.max quota clamps effective compute to sb.vcpus.
 			return c.PutMachineConfig(ctx, fcclient.MachineConfig{
-				VCPUCount: sb.vcpus, MemSizeMiB: sb.memMiB,
+				VCPUCount: max(sb.maxVCPUs, sb.vcpus), MemSizeMiB: sb.baseMemMiB,
 				TrackDirtyPages: a.chunked(), // Diff snapshots need dirty logging
 			})
 		},
@@ -359,6 +414,16 @@ func (a *Agent) bootFresh(ctx context.Context, sb *sandbox) error {
 			// Balloon device: 0 = nothing reclaimed until SetBalloon asks
 			// (M4 memory oversell); survives snapshots.
 			return c.PutBalloon(ctx, fcclient.Balloon{AmountMib: 0, DeflateOnOom: true})
+		},
+		func() error {
+			// virtio-mem region for runtime memory resize (M6). Pre-boot
+			// only; starts fully unplugged, so it costs nothing until a
+			// resize plugs blocks. Snapshot-restored VMs inherit the region
+			// from the snapshot instead.
+			if sb.hotplugTotalMiB() == 0 {
+				return nil
+			}
+			return c.PutMemoryHotplug(ctx, fcclient.MemoryHotplug{TotalSizeMiB: sb.hotplugTotalMiB()})
 		},
 		func() error {
 			return c.PutNetworkInterface(ctx, fcclient.NetworkInterface{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: "tap0"})
@@ -560,6 +625,19 @@ func (a *Agent) resume(ctx context.Context, sandboxID string) (st nodeapi.Sandbo
 	if err := c.LoadSnapshot(ctx, load); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
+	if sb.hotplugTotalMiB() > 0 {
+		// The plugged size is checkpoint-time state riding the snapfile, and
+		// the checkpoint being restored is not necessarily the last one this
+		// process saw (fork restores the parent's checkpoint, rollback an
+		// older one). Read the truth back from the device.
+		if st, err := c.GetMemoryHotplug(ctx); err != nil {
+			log.Printf("nodeagent: hotplug state after restore %s: %v", sb.id, err)
+		} else {
+			a.mu.Lock()
+			sb.memMiB = sb.baseMemMiB + st.PluggedSizeMiB
+			a.mu.Unlock()
+		}
+	}
 	if err := sb.machine.To(lifecycle.StateRunning); err != nil {
 		return nodeapi.SandboxStatus{}, err
 	}
@@ -691,6 +769,87 @@ func (a *Agent) DialGuest(ctx context.Context, sandboxID string, port int) (net.
 	return sb.lease.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", sb.lease.GuestIP, port))
 }
 
+// resizeMemory retargets the virtio-mem region so the sandbox's effective
+// memory becomes targetMiB (base ≤ target ≤ ceiling), then polls until the
+// guest driver converges. Growth must converge — a stuck driver is an error.
+// Shrink is guest-cooperative by design (the kernel must migrate pages out
+// of the blocks): a partial unplug is reported as the achieved size, not an
+// error. The achieved effective size is recorded on the sandbox either way.
+func (a *Agent) resizeMemory(ctx context.Context, sb *sandbox, targetMiB int) (int, error) {
+	if targetMiB < sb.baseMemMiB || targetMiB > sb.maxMemMiB {
+		return sb.memMiB, fmt.Errorf("resize %s: target %d MiB outside [%d, %d]",
+			sb.id, targetMiB, sb.baseMemMiB, sb.maxMemMiB)
+	}
+	grow := targetMiB > sb.memMiB
+	c := fcclient.New(a.fcAPISock(sb))
+	want := targetMiB - sb.baseMemMiB
+	if err := c.PatchMemoryHotplug(ctx, want); err != nil {
+		return sb.memMiB, err
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	var st fcclient.MemoryHotplugStatus
+	for {
+		var err error
+		if st, err = c.GetMemoryHotplug(ctx); err != nil {
+			return sb.memMiB, err
+		}
+		if st.PluggedSizeMiB == want || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return sb.memMiB, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	achieved := sb.baseMemMiB + st.PluggedSizeMiB
+	a.mu.Lock()
+	sb.memMiB = achieved
+	a.mu.Unlock()
+	if grow && achieved != targetMiB {
+		return achieved, fmt.Errorf("resize %s: guest plugged %d/%d MiB before deadline",
+			sb.id, st.PluggedSizeMiB, want)
+	}
+	return achieved, nil
+}
+
+// ResizeSandbox retargets a RUNNING sandbox's effective geometry within its
+// create-time ceilings (M6): memory via the virtio-mem region (growth
+// requires guest convergence; shrink is cooperative and may land above the
+// ask), CPU via the cgroup cpu.max quota. Memory is applied first — it is
+// the operation that can fail halfway; the result always reports the
+// achieved values so the control plane can reconcile its accounting.
+func (a *Agent) ResizeSandbox(ctx context.Context, sandboxID string, req nodeapi.ResizeRequest) (nodeapi.ResizeResult, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nodeapi.ResizeResult{}, err
+	}
+	res := nodeapi.ResizeResult{MemoryMiB: sb.memMiB, VCPUs: sb.vcpus}
+	if st := sb.machine.State(); st != lifecycle.StateRunning {
+		return res, fmt.Errorf("resize %s: state %s, want RUNNING", sandboxID, st)
+	}
+	if req.VCPUs != 0 && (req.VCPUs < 1 || req.VCPUs > sb.maxVCPUs) {
+		return res, fmt.Errorf("resize %s: vcpus %d outside [1, %d]", sandboxID, req.VCPUs, sb.maxVCPUs)
+	}
+	if req.MemoryMiB != 0 {
+		achieved, err := a.resizeMemory(ctx, sb, req.MemoryMiB)
+		res.MemoryMiB = achieved
+		if err != nil {
+			return res, err
+		}
+	}
+	if req.VCPUs != 0 && req.VCPUs != sb.vcpus {
+		if err := a.writeCPUMax(sb.id, req.VCPUs); err != nil {
+			return res, fmt.Errorf("resize %s: cpu.max: %w", sandboxID, err)
+		}
+		a.mu.Lock()
+		sb.vcpus = req.VCPUs
+		a.mu.Unlock()
+		res.VCPUs = req.VCPUs
+	}
+	return res, nil
+}
+
 // SetBalloon retargets a running sandbox's balloon device.
 func (a *Agent) SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error {
 	sb, err := a.get(sandboxID)
@@ -737,11 +896,16 @@ func (a *Agent) get(id string) (*sandbox, error) {
 }
 
 func (a *Agent) status(sb *sandbox) nodeapi.SandboxStatus {
+	a.mu.Lock()
+	mem, vcpus := sb.memMiB, sb.vcpus
+	a.mu.Unlock()
 	return nodeapi.SandboxStatus{
 		SandboxID: sb.id,
 		State:     string(sb.machine.State()),
 		GuestAddr: fmt.Sprintf("%s:%d", sb.lease.GuestIP, guestapi.Port),
 		Netns:     sb.lease.Netns,
+		MemoryMiB: mem,
+		VCPUs:     vcpus,
 	}
 }
 

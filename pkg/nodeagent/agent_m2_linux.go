@@ -200,6 +200,9 @@ func (a *Agent) pushDescriptor(ctx context.Context, sb *sandbox, hasWS bool) err
 		SnapSeq:       sb.snapCount,
 		DiskOrigin:    sb.diskOrigin,
 		Egress:        sb.egress,
+		BaseMemoryMiB: sb.baseMemMiB,
+		MaxMemoryMiB:  sb.maxMemMiB,
+		MaxVCPUs:      sb.maxVCPUs,
 	}
 	for _, lm := range sb.layers {
 		desc.Layers = append(desc.Layers, lm.LayerID)
@@ -370,6 +373,9 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		dir:         filepath.Join(a.cfg.WorkDir, sandboxID),
 		vcpus:       desc.VCPUs,
 		memMiB:      desc.MemoryMiB,
+		baseMemMiB:  desc.BaseMemoryMiB,
+		maxMemMiB:   desc.MaxMemoryMiB,
+		maxVCPUs:    desc.MaxVCPUs,
 		templateID:  desc.TemplateID,
 		dataDiskGiB: desc.DataDiskGiB,
 		mountDir:    dir,
@@ -383,6 +389,16 @@ func (a *Agent) RestoreSandbox(ctx context.Context, sandboxID, tier string) (nod
 		// A cold snapshot's chunks live only in the cold store; the next
 		// pause roots a fresh Full chain back in L1 (ADR-0004 D7).
 		forceFullPause: tier == "cold",
+	}
+	// Pre-M6 descriptors carry no resize fields: fixed geometry.
+	if sb.baseMemMiB == 0 {
+		sb.baseMemMiB = sb.memMiB
+	}
+	if sb.maxMemMiB < sb.baseMemMiB {
+		sb.maxMemMiB = sb.baseMemMiB
+	}
+	if sb.maxVCPUs < sb.vcpus {
+		sb.maxVCPUs = sb.vcpus
 	}
 	if err := os.MkdirAll(sb.snapDir(), 0o755); err != nil {
 		return nodeapi.SandboxStatus{}, err

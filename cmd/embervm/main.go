@@ -140,9 +140,9 @@ func runDev(args []string) {
 		log.Fatalf("lifecycle engine config: %v", err)
 	}
 	engine := controlplane.NewEngine(store, controlplane.SingleAgent(agent), l1, cold, engCfg)
-	go engine.Run(ctx)
-
 	srv := controlplane.NewServer(store, agent, tokens, l1, cold)
+	engine.CanFit = srv.CanFit // autoscale growth admission (M6)
+	go engine.Run(ctx)
 	httpSrv := &http.Server{
 		Addr:    *listen,
 		Handler: srv.Handler(),

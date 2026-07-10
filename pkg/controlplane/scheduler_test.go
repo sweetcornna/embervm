@@ -51,6 +51,43 @@ func newCluster(t *testing.T, capacities map[string]int) (*Store, *Scheduler, ma
 	return s, sched, agents
 }
 
+// TestSchedulerCanFit exercises the M6 resize growth admission: deltas
+// against the oversold budget, shrink always fits, down nodes reject.
+func TestSchedulerCanFit(t *testing.T) {
+	s, sched, _ := newCluster(t, map[string]int{"n1": 1024})
+	ctx := context.Background()
+
+	// Occupy 900 of n1's 1024 MiB.
+	id := pausedSandbox(t, s, "RUNNING", time.Second)
+	if err := s.SetSandboxNode(ctx, id, "n1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE sandboxes SET memory_mib=900 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := sched.CanFit(ctx, "n1", 100, 0); err != nil {
+		t.Errorf("CanFit(+100 of 124 free) = %v, want nil", err)
+	}
+	if err := sched.CanFit(ctx, "n1", 200, 0); !errors.Is(err, ErrNoCapacity) {
+		t.Errorf("CanFit(+200 of 124 free) = %v, want ErrNoCapacity", err)
+	}
+	// Shrink always fits, even on a full node.
+	if err := sched.CanFit(ctx, "n1", -512, -1); err != nil {
+		t.Errorf("CanFit(shrink) = %v, want nil", err)
+	}
+	if err := sched.CanFit(ctx, "nope", 1, 0); err == nil {
+		t.Error("CanFit(unknown node) = nil, want error")
+	}
+	// Down node rejects growth.
+	if err := s.SetNodeState(ctx, "n1", "down"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sched.CanFit(ctx, "n1", 1, 0); err == nil {
+		t.Error("CanFit(down node) = nil, want error")
+	}
+}
+
 func TestSchedulerPlaceSticky(t *testing.T) {
 	_, sched, _ := newCluster(t, map[string]int{"n1": 4096, "n2": 8192})
 	ctx := context.Background()

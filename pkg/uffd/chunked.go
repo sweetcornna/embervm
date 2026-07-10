@@ -197,6 +197,32 @@ func (h *Handler) copyPiecePagewise(p chunkPiece, data []byte) {
 	}
 }
 
+// zeroRunMax caps a single coalesced ZEROPAGE ioctl: demand faults must not
+// stall behind one giant mmap-lock hold.
+const zeroRunMax = 64 << 20
+
+// populateZeroRun zero-fills chunks [from..to] with span-sized ZEROPAGE
+// calls instead of per-chunk ones. Zeros are zeros even for pages a
+// concurrent balloon/hotplug REMOVE zapped, so the remove-race discipline
+// that keeps populateChunk from marking raced chunks does not apply here.
+func (h *Handler) populateZeroRun(from, to int) error {
+	cs := uint64(h.cfg.View.ChunkSize)
+	runOff := uint64(from) * cs
+	runLen := (to-from)*h.cfg.View.ChunkSize + h.cfg.View.Chunks[to].ULen
+	for _, p := range chunkPieces(h.mappings, runOff, runLen) {
+		for off := uint64(0); off < p.length; off += zeroRunMax {
+			n := min(uint64(zeroRunMax), p.length-off)
+			if err := h.zeroRange(p.hostAddr+off, n); err != nil {
+				return err
+			}
+		}
+	}
+	for ci := from; ci <= to; ci++ {
+		h.populated[ci].Store(true)
+	}
+	return nil
+}
+
 // zeroRange maps zeros over a span, falling back pagewise on EEXIST.
 func (h *Handler) zeroRange(dst uint64, length uint64) error {
 	_, err := ioctlZeropage(h.uffd, dst, length)
@@ -243,11 +269,27 @@ func (h *Handler) chunkedPrefetch(ws *WSTrace) {
 		}
 		h.logf("ws prefetch done: %d chunks in %s", h.stats.ChunksPrefetchedWS.Load(), time.Since(start))
 	}
-	for ci := range h.cfg.View.Chunks {
+	for ci := 0; ci < len(h.cfg.View.Chunks); ci++ {
 		if h.stopped() {
 			return
 		}
 		if h.populated[ci].Load() {
+			continue
+		}
+		// Zero chunks come in huge contiguous runs (never-plugged hotplug
+		// ranges, ballooned-out regions — M6): one ZEROPAGE per run instead
+		// of one ioctl per 8-16KiB chunk.
+		if h.cfg.View.Chunks[ci].Zero {
+			end := ci
+			for end+1 < len(h.cfg.View.Chunks) && h.cfg.View.Chunks[end+1].Zero && !h.populated[end+1].Load() {
+				end++
+			}
+			if err := h.populateZeroRun(ci, end); err != nil {
+				h.logf("backfill: zero run %d-%d: %v", ci, end, err)
+			} else {
+				h.stats.ChunksBackfilled.Add(uint64(end - ci + 1))
+			}
+			ci = end
 			continue
 		}
 		if err := h.populateChunk(ci, scratch, &h.stats.BytesCopiedPrefetch); err != nil {

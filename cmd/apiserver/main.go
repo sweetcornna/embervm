@@ -104,6 +104,7 @@ func main() {
 		fmt.Printf("apiserver listening addr=%s nodeagent=%s\n", *listen, *naSocket)
 	}
 	engine := controlplane.NewEngine(store, resolver, l1, cold, engCfg)
+	engine.CanFit = srv.CanFit // autoscale growth admission (M6)
 	go engine.Run(ctx)
 	httpSrv := &http.Server{
 		Addr:    *listen,

@@ -27,6 +27,16 @@ type CreateSandboxRequest struct {
 	// host-side proxy targets). The full zero-trust L7 egress proxy is a
 	// deferred product subsystem (ADR-0005).
 	Egress string `json:"egress,omitempty"`
+	// MaxMemoryMiB > MemoryMiB attaches a virtio-mem hotplug region so the
+	// sandbox can be resized at runtime up to this ceiling (M6). The node
+	// rounds the region up to Firecracker's 128 MiB slot granularity, so the
+	// effective ceiling may be slightly higher than requested. 0 or ==
+	// MemoryMiB means fixed geometry (no hotplug device).
+	MaxMemoryMiB int `json:"max_memory_mib,omitempty"`
+	// MaxVCPUs > VCPUs boots the VM with MaxVCPUs cores and clamps the
+	// effective compute to VCPUs via the cgroup cpu.max quota; resize moves
+	// the quota (M6 — Firecracker has no vCPU hotplug).
+	MaxVCPUs int `json:"max_vcpus,omitempty"`
 }
 
 // NodeHealth is a node's capacity heartbeat (M4 scheduler polling).
@@ -48,6 +58,26 @@ type SandboxStatus struct {
 	State     string `json:"state"`      // pkg/lifecycle state name
 	GuestAddr string `json:"guest_addr"` // e.g. "172.16.0.2:7777", reachable via the node
 	Netns     string `json:"netns"`
+	// Effective geometry (M6): moves with resize, and a restore can rewind
+	// it to checkpoint-time values — the control plane reconciles its
+	// accounting row from these after resume/resize.
+	MemoryMiB int `json:"memory_mib,omitempty"`
+	VCPUs     int `json:"vcpus,omitempty"`
+}
+
+// ResizeRequest retargets a RUNNING sandbox's effective resources (M6).
+// Zero fields are left unchanged. Bounds: memory ∈ [boot base, max ceiling]
+// via virtio-mem, vcpus ∈ [1, max_vcpus] via the cgroup cpu.max quota.
+type ResizeRequest struct {
+	MemoryMiB int `json:"memory_mib,omitempty"`
+	VCPUs     int `json:"vcpus,omitempty"`
+}
+
+// ResizeResult reports the achieved effective geometry. Memory shrink is
+// guest-cooperative: MemoryMiB may legally land above the request.
+type ResizeResult struct {
+	MemoryMiB int `json:"memory_mib"`
+	VCPUs     int `json:"vcpus"`
 }
 
 // GuestDialer is the optional data-plane contract behind the M4 gateway:
@@ -94,6 +124,10 @@ type Agent interface {
 	Prewarm(ctx context.Context, sandboxID, tier string) error
 	// SetBalloon retargets a running sandbox's balloon (memory reclaim).
 	SetBalloon(ctx context.Context, sandboxID string, targetMiB int) error
+	// ResizeSandbox retargets a RUNNING sandbox's effective memory
+	// (virtio-mem) and/or CPU (cgroup quota) within its create-time
+	// ceilings (M6). The result reports the achieved geometry.
+	ResizeSandbox(ctx context.Context, sandboxID string, req ResizeRequest) (ResizeResult, error)
 	// Fork creates a new sandbox from a parent's checkpoint layer ("p<N>")
 	// without touching the parent; Rollback switches a sandbox back to an
 	// earlier checkpoint layer in place, discarding everything after it
