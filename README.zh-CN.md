@@ -15,6 +15,7 @@
 - **分层冷归档**：热（本机 NVMe）→ 温（对象存储）→ 冷（低价层）→ 回收（仅留 artifacts），自动流转，冷层 ≤ $5/TB/月
 - **弹性计算**：创建 < 500ms，单节点 50+ 并发，节点池水平扩容
 - **零厂商锁定**：普通 Linux + PostgreSQL + Redis + 任意 S3 兼容存储；不依赖 Nomad/Consul/GCP（这正是自托管 E2B 的最大痛点）
+- **内置 Web 控制台**：API server 在 `/` 内嵌管理界面（舰队热度图、生命周期操作、运行时 resize、checkpoint/fork/rollback、guest 内 exec、存储成本）；单二进制交付,无需额外部署（`make web` 从 `web/` 重建）
 
 ## 原理（一段话）
 

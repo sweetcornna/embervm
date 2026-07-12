@@ -6,7 +6,24 @@ versions**, and every break is listed here (docs/zh/05 §4). Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
-## [Unreleased] — Runtime elasticity (M6)
+## [Unreleased]
+
+### Added
+
+- **Web console** — a management UI embedded in the apiserver binary
+  (`pkg/webui` + `web/`, React + TypeScript, served at `/` with the SPA
+  fallback excluded from `/v0`): fleet heat map (every sandbox an ember on
+  the lifecycle thermal ramp), node capacity, sandbox table with live
+  memory gauges (base | effective | max), create dialog with resize
+  ceilings + autoscale + egress, detail page (lifecycle verbs, resize
+  slider, checkpoints/fork/rollback, in-guest exec, storage costs),
+  templates and storage-report pages. Bearer-token login; fonts bundled
+  (works air-gapped); dark operator theme. `GET /v0/nodes` added for the
+  fleet view (nodes + live usage + active counts). Built assets are
+  committed so `go build` alone ships a working console; `make web`
+  rebuilds them.
+
+## [v0.6.0-m6] — 2026-07-10 — Runtime elasticity (M6) — **v0.3**
 
 A sandbox's resources stop being fixed at create: memory grows and shrinks
 at runtime through a virtio-mem hotplug region (real host reclaim,

@@ -15,6 +15,7 @@
 - **Tiered cold archive** — hot (local NVMe) → warm (object storage) → cold (low-cost tier) → recycled (artifacts only), automatic lifecycle, cold tier ≤ $5/TB/month
 - **Elastic compute** — sandbox creation < 500ms, 50+ concurrent sandboxes per node, horizontally scalable worker pool
 - **Zero vendor lock-in** — plain Linux + PostgreSQL + Redis + any S3-compatible store; no Nomad/Consul/GCP coupling (the main pain point of self-hosting E2B)
+- **Built-in web console** — the API server embeds a management UI at `/` (fleet heat map, lifecycle actions, runtime resize, checkpoints/fork/rollback, in-guest exec, storage costs); one binary, nothing extra to deploy (`make web` rebuilds it from `web/`)
 
 ## How it works (one paragraph)
 

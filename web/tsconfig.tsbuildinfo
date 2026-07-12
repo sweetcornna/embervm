@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/api/client.ts","./src/api/hooks.ts","./src/api/types.ts","./src/components/ember.tsx","./src/components/ui.tsx","./src/pages/login.tsx","./src/pages/overview.tsx","./src/pages/sandboxdetail.tsx","./src/pages/sandboxes.tsx","./src/pages/storage.tsx","./src/pages/templates.tsx"],"version":"5.9.3"}

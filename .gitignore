@@ -17,3 +17,6 @@ vmlinux*
 *.swp
 .idea/
 .vscode/
+
+# frontend
+web/node_modules/

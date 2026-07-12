@@ -27,6 +27,7 @@ import (
 	"github.com/embervm/embervm/pkg/metrics"
 	"github.com/embervm/embervm/pkg/nodeagent"
 	"github.com/embervm/embervm/pkg/nodeapi"
+	"github.com/embervm/embervm/pkg/webui"
 )
 
 // Server is the REST control plane: it persists state in Store and drives the
@@ -175,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 
 	v0.GET("/sandboxes/:id/storage", s.sandboxStorage)
 	v0.GET("/storage-report", s.storageReportAll)
+	v0.GET("/nodes", s.listNodes)
 	v0.POST("/sandboxes/:id/restore-artifacts", s.restoreArtifacts)
 
 	v0.Any("/sandboxes/:id/proxy/:port/*path", s.proxyGuest)
@@ -182,6 +184,18 @@ func (s *Server) Handler() http.Handler {
 	v0.POST("/sandboxes/:id/exec", s.execSandbox)
 	v0.GET("/sandboxes/:id/files", s.readFile)
 	v0.PUT("/sandboxes/:id/files", s.writeFile)
+
+	// Everything that is not an API route is the embedded console SPA.
+	// /v0 misses stay JSON errors — a client-routed HTML page answering an
+	// API typo would be a debugging trap.
+	console := webui.Handler()
+	r.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/v0/") {
+			abortErr(c, http.StatusNotFound, ErrNotFound)
+			return
+		}
+		console.ServeHTTP(c.Writer, c.Request)
+	})
 	return r
 }
 
@@ -678,6 +692,34 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, sb)
+}
+
+// listNodes reports the cluster's workers with their live usage — the
+// console's fleet view. Nodes are cluster-wide facts, not tenant-scoped
+// resources, but the route still sits behind token auth like all of /v0.
+func (s *Server) listNodes(c *gin.Context) {
+	nodes, err := s.store.ListNodes(c)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	usage, err := s.store.NodeUsage(c)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	type nodeView struct {
+		Node
+		UsedMiB   int `json:"used_mib"`
+		UsedVCPUs int `json:"used_vcpus"`
+		Active    int `json:"active_sandboxes"`
+	}
+	out := make([]nodeView, 0, len(nodes))
+	for _, n := range nodes {
+		u := usage[n.ID]
+		out = append(out, nodeView{Node: n, UsedMiB: u.MemMiB, UsedVCPUs: u.VCPUs, Active: u.Active})
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // migrateSandbox moves a sandbox to another node (M6): pause (chunked

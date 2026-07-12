@@ -2,9 +2,14 @@ GO      ?= go
 BIN_DIR ?= bin
 GOOS_TARGET ?= linux
 
-.PHONY: all build build-host lint fmt vet test clean
+.PHONY: all build build-host lint fmt vet test clean web
 
 all: lint build test
+
+# Rebuild the management console into pkg/webui/dist (committed, so plain
+# `go build` always embeds a working console without needing node).
+web:
+	cd web && npm ci && npm run build && npm test
 
 # Cross-compile all Linux binaries (works from macOS; CI runs natively).
 build:

@@ -1,0 +1,68 @@
+@import "tailwindcss";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* EmberVM console — "ash & ember". The product's mental model is literally
+   temperature (RUNNING hot → PAUSED-HOT → WARM → COLD → ash), so the state
+   system IS the palette: a thermal ramp on a warm ash-black ground. Dark-only
+   by design — this is an operator console. */
+@theme {
+  --color-bg: #14110d;
+  --color-surface: #1c1812;
+  --color-raised: #262017;
+  --color-border: #352e23;
+  --color-hairline: #292318;
+  --color-ink: #ede6dc;
+  --color-muted: #a29a8e;
+  --color-faint: #6e675d;
+
+  /* thermal ramp */
+  --color-ember: #ffa03d; /* RUNNING */
+  --color-heat: #e4572e; /* PAUSED_HOT */
+  --color-rust: #b0713f; /* PAUSED_WARM */
+  --color-cold: #7492a7; /* ARCHIVED_COLD */
+  --color-ash: #6e675d; /* STOPPED / RECYCLED */
+  --color-alarm: #e5484d; /* FAILED */
+  --color-transit: #e3b341; /* PENDING / STARTING / RESUMING / PAUSING / STOPPING */
+
+  --font-display: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
+}
+
+html {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-ember) 35%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-ember);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* The one moving thing: RUNNING embers breathe. */
+@keyframes ember-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-ember) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 8px 2px color-mix(in srgb, var(--color-ember) 45%, transparent);
+  }
+}
+.ember-live {
+  animation: ember-breathe 2.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ember-live {
+    animation: none;
+    box-shadow: 0 0 6px 1px color-mix(in srgb, var(--color-ember) 40%, transparent);
+  }
+}

@@ -645,6 +645,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 type Usage struct {
 	MemMiB int
 	VCPUs  int
+	Active int // active sandboxes placed on the node
 }
 
 // NodeUsage sums the memory and vCPUs of active sandboxes per node (the
@@ -656,7 +657,7 @@ func (s *Store) NodeUsage(ctx context.Context) (map[string]Usage, error) {
 	// excluding it lets concurrent placements all read the same free budget
 	// and overshoot even the oversold ceiling.
 	rows, err := s.pool.Query(ctx,
-		`SELECT node_id, COALESCE(SUM(memory_mib),0), COALESCE(SUM(vcpus),0) FROM sandboxes
+		`SELECT node_id, COALESCE(SUM(memory_mib),0), COALESCE(SUM(vcpus),0), COUNT(*) FROM sandboxes
 		 WHERE state IN ('PENDING','STARTING','RUNNING','RESUMING','PAUSING') AND node_id <> ''
 		 GROUP BY node_id`)
 	if err != nil {
@@ -667,7 +668,7 @@ func (s *Store) NodeUsage(ctx context.Context) (map[string]Usage, error) {
 	for rows.Next() {
 		var id string
 		var u Usage
-		if err := rows.Scan(&id, &u.MemMiB, &u.VCPUs); err != nil {
+		if err := rows.Scan(&id, &u.MemMiB, &u.VCPUs, &u.Active); err != nil {
 			return nil, err
 		}
 		out[id] = u
