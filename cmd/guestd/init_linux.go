@@ -17,20 +17,23 @@ import (
 // (CONFIG_DEVTMPFS_MOUNT), which surfaces as EBUSY.
 func mountAll() {
 	mounts := []struct {
-		src, dst, typ string
+		src, dst, typ, data string
 	}{
-		{"proc", "/proc", "proc"},
-		{"sysfs", "/sys", "sysfs"},
-		{"devtmpfs", "/dev", "devtmpfs"},
-		{"tmpfs", "/tmp", "tmpfs"},
-		{"tmpfs", "/run", "tmpfs"},
+		{"proc", "/proc", "proc", ""},
+		{"sysfs", "/sys", "sysfs", ""},
+		{"devtmpfs", "/dev", "devtmpfs", ""},
+		// devpts backs the interactive terminal (/term): ptmxmode makes
+		// /dev/pts/ptmx usable even when devtmpfs lacks a /dev/ptmx node.
+		{"devpts", "/dev/pts", "devpts", "ptmxmode=0666,mode=0620"},
+		{"tmpfs", "/tmp", "tmpfs", ""},
+		{"tmpfs", "/run", "tmpfs", ""},
 	}
 	for _, m := range mounts {
 		if err := os.MkdirAll(m.dst, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "guestd: mkdir %s: %v\n", m.dst, err)
 			continue
 		}
-		if err := unix.Mount(m.src, m.dst, m.typ, 0, ""); err != nil && !errors.Is(err, unix.EBUSY) {
+		if err := unix.Mount(m.src, m.dst, m.typ, 0, m.data); err != nil && !errors.Is(err, unix.EBUSY) {
 			fmt.Fprintf(os.Stderr, "guestd: mount %s: %v\n", m.dst, err)
 		}
 	}

@@ -115,6 +115,15 @@ func (c *Client) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+// ListDir lists an absolute directory path in the guest.
+func (c *Client) ListDir(ctx context.Context, path string) (*ListDirResponse, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/files", url.Values{"path": {path}, "op": {"list"}}, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	return decodeJSON[ListDirResponse](resp)
+}
+
 // WriteFile writes data to an absolute path in the guest, creating parent
 // directories as needed.
 func (c *Client) WriteFile(ctx context.Context, path string, mode fs.FileMode, data []byte) error {

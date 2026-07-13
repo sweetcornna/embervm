@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Component, useEffect, useRef } from "react";
+import { Component, useEffect, useRef, useState } from "react";
 
 /* ── Error boundary ──────────────────────────────────────────────────────
    A render throw must degrade to a readable panel, never a white screen.
@@ -199,6 +199,101 @@ export function Dialog(props: { title: string; open: boolean; onClose: () => voi
       </div>
       <div className="p-5">{props.children}</div>
     </dialog>
+  );
+}
+
+/* ── Confirm dialog ──────────────────────────────────────────────────────
+   The one replacement for window.confirm: states the consequence, focuses
+   Cancel (destructive default must not be a stray Enter away). */
+export function ConfirmDialog(props: {
+  open: boolean;
+  title: string;
+  body: ReactNode;
+  confirmLabel: string;
+  busy?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (props.open) cancelRef.current?.focus();
+  }, [props.open]);
+  return (
+    <Dialog title={props.title} open={props.open} onClose={props.onClose}>
+      <div className="space-y-4">
+        <div className="text-[13px] leading-relaxed text-muted">{props.body}</div>
+        <div className="flex justify-end gap-2">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={props.onClose}
+            className="inline-flex items-center rounded-md border border-border bg-raised/40 px-3 py-1.5 text-[13px] font-medium text-ink hover:bg-raised"
+          >
+            Cancel
+          </button>
+          <Button kind="danger" onClick={props.onConfirm} busy={props.busy}>
+            {props.confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+/** Imperative confirm state helper: `const c = useConfirm(); c.ask(fn)`. */
+export function useConfirm() {
+  const [pending, setPending] = useState<(() => void) | null>(null);
+  return {
+    open: pending !== null,
+    ask: (fn: () => void) => setPending(() => fn),
+    confirm: () => {
+      pending?.();
+      setPending(null);
+    },
+    close: () => setPending(null),
+  };
+}
+
+/* ── Skeleton / KBD / IconButton ─────────────────────────────────────── */
+export function Skeleton(props: { className?: string }) {
+  return (
+    <div
+      aria-hidden
+      className={`skeleton rounded bg-raised ${props.className ?? "h-4 w-24"}`}
+    />
+  );
+}
+
+export function KBD(props: { children: ReactNode }) {
+  return (
+    <kbd className="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[10px] text-muted">
+      {props.children}
+    </kbd>
+  );
+}
+
+export function IconButton(props: {
+  children: ReactNode;
+  label: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={props.label}
+      title={props.label}
+      onClick={props.onClick}
+      disabled={props.disabled}
+      className={`inline-flex size-7 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        props.danger
+          ? "text-muted hover:bg-danger/10 hover:text-danger"
+          : "text-muted hover:bg-raised hover:text-ink"
+      }`}
+    >
+      {props.children}
+    </button>
   );
 }
 

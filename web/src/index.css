@@ -40,6 +40,19 @@
   --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
 
   --radius: 0.5rem;
+
+  /* motion — fast, ease-out, transform/opacity only */
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 260ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+  /* elevation (dark theme = shadow + border together) */
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-overlay: 0 4px 16px rgb(0 0 0 / 0.5), 0 0 0 1px var(--color-border);
+
+  /* charts */
+  --color-grid: #1a1f29;
 }
 
 html {
@@ -94,4 +107,52 @@ body {
   .spin {
     animation-duration: 1.4s;
   }
+}
+
+/* Enter transitions for layered surfaces (menus, toasts, dialogs): fade +
+   4px translate, collapsed to instant under reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes enter-up {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+  @keyframes enter-down {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+  .enter-up {
+    animation: enter-up var(--dur) var(--ease-out);
+  }
+  .enter-down {
+    animation: enter-down var(--dur) var(--ease-out);
+  }
+  @keyframes pulse-dim {
+    50% {
+      opacity: 0.55;
+    }
+  }
+  .skeleton {
+    animation: pulse-dim 1.6s ease-in-out infinite;
+  }
+}
+
+/* xterm.js bridge — the terminal must look native to the console. xterm's
+   own colors come from the JS ITheme (lib/term.ts); this covers chrome. */
+.xterm {
+  height: 100%;
+  padding: 8px 4px 8px 10px;
+}
+.xterm .xterm-viewport {
+  background: transparent !important;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+/* xterm's focus outline duplicates ours */
+.xterm.focus,
+.xterm:focus {
+  outline: none;
 }

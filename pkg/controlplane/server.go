@@ -46,7 +46,22 @@ type Server struct {
 	// the map.
 	gtMu            sync.Mutex
 	guestTransports map[string]*http.Transport
+
+	// Guest-health probe cache: the console polls every open workspace at
+	// ~2.5s, and multiple tabs multiply that; a short TTL keeps the guest
+	// probe rate bounded (each probe also bumps guestd's seq counter).
+	hcMu    sync.Mutex
+	hcCache map[string]cachedHealth
 }
+
+// cachedHealth is one sandbox's last successful guest-health probe.
+type cachedHealth struct {
+	at time.Time
+	h  *guestapi.HealthResponse
+}
+
+// healthCacheTTL is deliberately ≤ the console's poll interval.
+const healthCacheTTL = 2 * time.Second
 
 // LocalNodeID names the implicit node of a single-agent deployment.
 const LocalNodeID = "local"
@@ -72,7 +87,7 @@ func NewServer(store *Store, agent nodeapi.Agent, tokens *TokenStore, l1, cold c
 // runs sched.RegisterNodes + sched.Run.
 func NewClusterServer(store *Store, registry *Registry, sched *Scheduler, tokens *TokenStore, l1, cold chunkstore.ListingBackend) *Server {
 	return &Server{store: store, registry: registry, sched: sched, tokens: tokens, l1: l1, cold: cold,
-		guestTransports: map[string]*http.Transport{}}
+		guestTransports: map[string]*http.Transport{}, hcCache: map[string]cachedHealth{}}
 }
 
 // guestTransportFor returns the shared proxy transport for one node's
@@ -131,7 +146,9 @@ const (
 func limitBodies() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		route := c.FullPath()
-		if strings.Contains(route, "/proxy/") || c.Request.Body == nil {
+		// /term is exempt like /proxy/: both hijack the connection for
+		// streaming, so a body cap is meaningless there.
+		if strings.Contains(route, "/proxy/") || strings.HasSuffix(route, "/term") || c.Request.Body == nil {
 			c.Next()
 			return
 		}
@@ -184,6 +201,8 @@ func (s *Server) Handler() http.Handler {
 	v0.POST("/sandboxes/:id/exec", s.execSandbox)
 	v0.GET("/sandboxes/:id/files", s.readFile)
 	v0.PUT("/sandboxes/:id/files", s.writeFile)
+	v0.GET("/sandboxes/:id/health", s.sandboxHealth)
+	v0.GET("/sandboxes/:id/term", s.termSandbox)
 
 	// Everything that is not an API route is the embedded console SPA.
 	// /v0 misses stay JSON errors — a client-routed HTML page answering an
@@ -1452,6 +1471,15 @@ func (s *Server) readFile(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if c.Query("op") == "list" {
+		listing, err := agent.ListDir(c, sb.ID, path)
+		if err != nil {
+			abortErr(c, http.StatusInternalServerError, err)
+			return
+		}
+		c.JSON(http.StatusOK, listing)
+		return
+	}
 	data, err := agent.ReadFile(c, sb.ID, path)
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
@@ -1494,4 +1522,137 @@ func (s *Server) writeFile(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// healthView is the /health response: the sandbox's stored state plus, when
+// RUNNING and reachable, the guest's live pressure numbers.
+type healthView struct {
+	State string `json:"state"`
+	*guestapi.HealthResponse
+}
+
+// sandboxHealth proxies the guest's live health (memory, PSI pressure) to
+// the console. A non-RUNNING sandbox is not an error — the console polls
+// through pauses — so it answers 200 with ok:false and no probe. 502 is
+// reserved for the genuinely abnormal case: the row says RUNNING but the
+// guest cannot be reached (a pause race, or a wedged VM).
+func (s *Server) sandboxHealth(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	if sb.State != string(lifecycle.StateRunning) {
+		c.JSON(http.StatusOK, healthView{State: sb.State, HealthResponse: &guestapi.HealthResponse{OK: false}})
+		return
+	}
+	if h, ok := s.cachedGuestHealth(sb.ID); ok {
+		metrics.GuestHealthProbes.WithLabelValues("cached").Inc()
+		c.JSON(http.StatusOK, healthView{State: sb.State, HealthResponse: h})
+		return
+	}
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
+		return
+	}
+	// A poll must not ride the nodeapi client's generous verb timeout.
+	ctx, cancel := context.WithTimeout(c, 3*time.Second)
+	defer cancel()
+	h, err := agent.Health(ctx, sb.ID)
+	if err != nil {
+		metrics.GuestHealthProbes.WithLabelValues("error").Inc()
+		abortErr(c, http.StatusBadGateway, err)
+		return
+	}
+	metrics.GuestHealthProbes.WithLabelValues("ok").Inc()
+	s.storeGuestHealth(sb.ID, h)
+	c.JSON(http.StatusOK, healthView{State: sb.State, HealthResponse: h})
+}
+
+func (s *Server) cachedGuestHealth(id string) (*guestapi.HealthResponse, bool) {
+	s.hcMu.Lock()
+	defer s.hcMu.Unlock()
+	e, ok := s.hcCache[id]
+	if !ok || time.Since(e.at) > healthCacheTTL {
+		return nil, false
+	}
+	return e.h, true
+}
+
+func (s *Server) storeGuestHealth(id string, h *guestapi.HealthResponse) {
+	s.hcMu.Lock()
+	defer s.hcMu.Unlock()
+	// Entries are overwritten in place; the only unbounded growth is dead
+	// sandbox ids, so a rare full purge is enough.
+	if len(s.hcCache) > 4096 {
+		clear(s.hcCache)
+	}
+	s.hcCache[id] = cachedHealth{at: time.Now(), h: h}
+}
+
+// termSandbox is the interactive terminal: an authenticated, owner-scoped
+// WebSocket that tunnels to guestd's /term (which owns the PTY). The data
+// path is exactly the guest proxy's — httputil.ReverseProxy passes the
+// Upgrade through — so split-mode needs no new nodeapi verb. Auth arrives
+// via a Sec-WebSocket-Protocol bearer entry that Auth() already stripped, so
+// the guest never sees the credential.
+func (s *Server) termSandbox(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	if sb.State != string(lifecycle.StateRunning) {
+		metrics.TermSessions.WithLabelValues("denied").Inc()
+		abortErr(c, http.StatusConflict, fmt.Errorf("sandbox is %s, terminals need RUNNING", sb.State))
+		return
+	}
+	if !strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+		abortErr(c, http.StatusBadRequest, errors.New("websocket upgrade required"))
+		return
+	}
+	agent, ok := s.agentOf(c, sb)
+	if !ok {
+		return
+	}
+
+	var handler http.Handler
+	switch g := agent.(type) {
+	case nodeapi.GuestDialer: // in-proc: dial the netns directly
+		nodeID := sb.NodeID
+		if nodeID == "" {
+			nodeID = LocalNodeID
+		}
+		handler = &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.Out.URL.Scheme = "http"
+				pr.Out.URL.Host = net.JoinHostPort(sb.ID, strconv.Itoa(guestapi.Port))
+				pr.Out.URL.Path = "/term" // query (?cols=&rows=) rides along
+			},
+			Transport: s.guestTransportFor(nodeID, g),
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(err.Error()))
+			},
+		}
+	case nodeapi.GuestProxier: // split mode: hop over the node's UDS
+		inner := g.GuestProxy(sb.ID, guestapi.Port)
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/term"
+			inner.ServeHTTP(w, r2)
+		})
+	default:
+		abortErr(c, http.StatusNotImplemented, errors.New("node does not support guest proxying"))
+		return
+	}
+
+	metrics.TermSessionsActive.Inc()
+	defer metrics.TermSessionsActive.Dec()
+	handler.ServeHTTP(c.Writer, c.Request) // blocks for the whole session
+	// A hijacked (upgraded) session reports status 0; anything else means
+	// the handshake failed before streaming started.
+	result := "error"
+	if status := c.Writer.Status(); status == 0 || status == http.StatusSwitchingProtocols {
+		result = "ok"
+	}
+	metrics.TermSessions.WithLabelValues(result).Inc()
 }

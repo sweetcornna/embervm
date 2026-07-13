@@ -45,6 +45,7 @@ func NewServer(a Agent) http.Handler {
 	mux.HandleFunc("GET /sandboxes/{id}/health", s.health)
 	mux.HandleFunc("GET /sandboxes/{id}/files", s.readFile)
 	mux.HandleFunc("PUT /sandboxes/{id}/files", s.writeFile)
+	mux.HandleFunc("GET /sandboxes/{id}/files/list", s.listDir)
 	if gd, ok := a.(GuestDialer); ok {
 		// Gateway data path: any method, any subpath, WebSocket-transparent
 		// (httputil.ReverseProxy passes Upgrade through).
@@ -349,6 +350,15 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h)
 }
 
+func (s *server) listDir(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.agent.ListDir(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *server) readFile(w http.ResponseWriter, r *http.Request) {
 	data, err := s.agent.ReadFile(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"))
 	if err != nil {
@@ -601,6 +611,16 @@ func (c *Client) ReadFile(ctx context.Context, sandboxID, path string) ([]byte, 
 		return nil, fmt.Errorf("nodeagent read file: HTTP %d: %s", resp.StatusCode, raw)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func (c *Client) ListDir(ctx context.Context, sandboxID, path string) (*guestapi.ListDirResponse, error) {
+	var resp guestapi.ListDirResponse
+	err := c.do(ctx, http.MethodGet, "/sandboxes/"+sandboxID+"/files/list",
+		url.Values{"path": {path}}, nil, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 func (c *Client) WriteFile(ctx context.Context, sandboxID, path string, mode fs.FileMode, data []byte) error {

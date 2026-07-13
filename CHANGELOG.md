@@ -35,6 +35,44 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ### Added
 
+- **Workspace (console phase 1)** — the per-sandbox detail page grew into a
+  full-bleed IDE-style workspace at `#/sandboxes/:id/{overview,terminal,
+  files,checkpoints}` (tab state = URL): an **interactive terminal**
+  (xterm.js, multi-session, scrollback survives tab switches, sessions
+  survive hot pause/resume), a **file browser + editor** (lazy directory
+  tree, CodeMirror 6 with a token-native theme, binary/size guards,
+  upload/download/new-file, `⌘S` saves to the guest disk), **live guest
+  gauges** (memory used, PSI memory/CPU sparklines off a 2.5 s health poll
+  with a rolling in-browser window), a checkpoints tab, an always-visible
+  health pill, optimistic lifecycle verbs with toasts, and a proper
+  confirm dialog replacing every `window.confirm`. New deps (all
+  offline-bundled): `radix-ui` (menu/tabs/tooltip/toast primitives),
+  `@xterm/*`, `codemirror`; xterm and CodeMirror are code-split out of the
+  entry chunk.
+- **Interactive terminal API** — `GET /v0/sandboxes/:id/term` upgrades to a
+  WebSocket and tunnels to a PTY served by guestd inside the guest
+  (`/bin/sh -l`; subprotocol `embervm-term.v1`: binary frames = raw PTY
+  bytes, text frames = JSON resize/exit control). The data path reuses the
+  WS-transparent guest-proxy machinery (no new nodeapi verb); browser auth
+  rides a `Sec-WebSocket-Protocol` `bearer.<base64url>` entry that the
+  auth middleware validates and **strips**, so the platform credential
+  never reaches guest code. Session policy lives in guestd: 8 concurrent
+  sessions, 30 min idle timeout, ping/pong reaping of orphaned shells
+  after snapshot restores. guestd's init now mounts `devpts` (with a
+  `/dev/pts/ptmx` fallback in the PTY opener) so minimal images get PTYs.
+  New Go dep: `github.com/coder/websocket` (guestd + tests; registered in
+  THIRD_PARTY_NOTICES).
+- **Guest health proxy** — `GET /v0/sandboxes/:id/health` exposes guestd's
+  live pressure (MemTotal/MemAvailable, PSI some-avg10, resumes, seq) to
+  the console; non-RUNNING answers `200 {ok:false}` without touching the
+  node, and a 2 s server-side cache bounds the probe rate. New metrics:
+  `embervm_guest_health_probes_total`, `embervm_term_sessions_active`,
+  `embervm_term_sessions_total`.
+- **Directory listing** — `GET /v0/sandboxes/:id/files?op=list&path=` lists
+  a guest directory (lstat metadata, symlink targets, dirs-first, 10 000
+  entry cap) via a new `ListDir` verb through nodeapi/guestd; plain
+  `GET /files` reads are unchanged.
+
 - **Web console** — a management UI embedded in the apiserver binary
   (`pkg/webui` + `web/`, React + TypeScript, served at `/` with the SPA
   fallback excluded from `/v0`): fleet heat map (every sandbox an ember on

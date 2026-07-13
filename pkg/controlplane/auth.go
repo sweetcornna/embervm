@@ -2,8 +2,10 @@ package controlplane
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -87,10 +89,15 @@ const ctxTokenKey = "embervm.token"
 
 // Auth is Gin middleware that requires a valid `Authorization: Bearer <token>`
 // and stashes the TokenInfo in the request context. Unknown or missing tokens
-// get 401.
+// get 401. WebSocket upgrades may instead smuggle the token in a
+// Sec-WebSocket-Protocol entry (see wsProtocolToken) — the browser WebSocket
+// API cannot set Authorization.
 func (ts *TokenStore) Auth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := bearerToken(c.GetHeader("Authorization"))
+		if !ok {
+			token, ok = wsProtocolToken(c.Request)
+		}
 		if !ok {
 			c.AbortWithStatusJSON(401, gin.H{"error": "missing bearer token"})
 			return
@@ -103,6 +110,52 @@ func (ts *TokenStore) Auth() gin.HandlerFunc {
 		c.Set(ctxTokenKey, info)
 		c.Next()
 	}
+}
+
+// wsTokenPrefix marks the credential entry a browser offers among its
+// WebSocket subprotocols: "bearer.<base64url-nopad(token)>". base64url
+// because raw tokens may contain characters illegal in the header's token
+// grammar (e.g. "=").
+const wsTokenPrefix = "bearer."
+
+// wsProtocolToken extracts a bearer token from Sec-WebSocket-Protocol on a
+// WebSocket upgrade. The matched entry is REMOVED from the request header
+// before any handler runs: /term and the generic guest proxy both forward
+// the handshake into guest-controlled code, and the platform credential must
+// never travel with it. The remaining entries (e.g. the real application
+// subprotocol) are preserved for the upstream negotiation.
+func wsProtocolToken(r *http.Request) (string, bool) {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return "", false
+	}
+	var token string
+	found := false
+	var kept []string
+	for _, header := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for p := range strings.SplitSeq(header, ",") {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if !found && strings.HasPrefix(p, wsTokenPrefix) {
+				if raw, err := base64.RawURLEncoding.DecodeString(p[len(wsTokenPrefix):]); err == nil {
+					token = string(raw)
+					found = true
+					continue // strip the credential entry
+				}
+			}
+			kept = append(kept, p)
+		}
+	}
+	if !found {
+		return "", false
+	}
+	if len(kept) > 0 {
+		r.Header.Set("Sec-WebSocket-Protocol", strings.Join(kept, ", "))
+	} else {
+		r.Header.Del("Sec-WebSocket-Protocol")
+	}
+	return token, true
 }
 
 // tokenInfo extracts the authenticated TokenInfo set by Auth.

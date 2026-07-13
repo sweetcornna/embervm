@@ -734,6 +734,15 @@ func (a *Agent) WriteFile(ctx context.Context, sandboxID, path string, mode fs.F
 	return sb.guest.WriteFile(ctx, path, mode, data)
 }
 
+// ListDir lists a guest directory via guestd.
+func (a *Agent) ListDir(ctx context.Context, sandboxID, path string) (*guestapi.ListDirResponse, error) {
+	sb, err := a.get(sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return sb.guest.ListDir(ctx, path)
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // Healthz reports capacity for the scheduler's poll.

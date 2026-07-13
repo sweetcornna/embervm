@@ -108,3 +108,60 @@ export interface StorageReportAll {
   total_artifact_bytes: number;
   total_chunks: number;
 }
+
+// GET /sandboxes/:id/health — live guest pressure. Non-RUNNING states answer
+// ok:false with no guest numbers (that is a state, not an error).
+export interface SandboxHealth {
+  state: SandboxState;
+  ok: boolean;
+  seq?: number;
+  pid?: number;
+  version?: string;
+  resumes?: number;
+  mem_total_kib?: number;
+  mem_available_kib?: number;
+  psi_mem_some10?: number;
+  psi_cpu_some10?: number;
+}
+
+// GET /sandboxes/:id/files?op=list — guest directory listing.
+export interface DirEntry {
+  name: string;
+  size: number;
+  mode: string; // fs.FileMode.String(), e.g. "drwxr-xr-x"
+  mtime: string;
+  is_dir: boolean;
+  symlink?: string;
+}
+
+export interface ListDirResponse {
+  path: string;
+  entries: DirEntry[] | null;
+  truncated?: boolean;
+}
+
+// GET /sandboxes/:id/events — lifecycle timeline (newest first, id-cursored).
+export interface SandboxEvent {
+  id: number;
+  sandbox_id: string;
+  from_state?: SandboxState | "";
+  to_state: SandboxState;
+  at: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface SandboxEvents {
+  events: SandboxEvent[] | null;
+  next_before?: number;
+}
+
+// Interactive terminal wire protocol (GET /sandboxes/:id/term, WebSocket).
+// Binary frames = raw PTY bytes; text frames = JSON TermControl.
+export const TERM_SUBPROTOCOL = "embervm-term.v1";
+
+export interface TermControl {
+  type: "resize" | "exit";
+  cols?: number;
+  rows?: number;
+  code?: number;
+}
