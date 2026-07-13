@@ -6,11 +6,11 @@ import { useMutation } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { decodeBytes, fmtAge, fmtBytes, fmtKiB, fmtMiB, fmtPct } from "../../api/client";
-import { useSandboxAction, useStorage, verbs } from "../../api/hooks";
+import { useSandboxAction, useSandboxEvents, useStorage, verbs } from "../../api/hooks";
 import type { ExecResult } from "../../api/hooks";
-import type { Sandbox } from "../../api/types";
+import type { Sandbox, SandboxState } from "../../api/types";
 import { Sparkline } from "../../components/charts";
-import { MemGauge } from "../../components/status";
+import { MemGauge, STATE_META } from "../../components/status";
 import { Button, Card, Empty, ErrorNote, Field, Mono, inputCls } from "../../components/ui";
 import type { HealthSample } from "../../lib/health";
 import { useSandboxHealth } from "../../lib/health";
@@ -37,7 +37,59 @@ export function OverviewTab(props: { sb: Sandbox }) {
           <ExecPanel sb={sb} />
         </Card>
       </div>
+      <RecentEvents sb={sb} />
     </div>
+  );
+}
+
+/* ── Recent lifecycle events (full history on the Checkpoints tab) ────── */
+
+function RecentEvents(props: { sb: Sandbox }) {
+  const { data } = useSandboxEvents(props.sb.id);
+  const events = (data?.events ?? []).slice(0, 5);
+  return (
+    <Card
+      title="Recent events"
+      actions={
+        <Link
+          to={`/sandboxes/${props.sb.id}/checkpoints`}
+          className="text-xs text-accent hover:underline"
+        >
+          full timeline →
+        </Link>
+      }
+      pad={false}
+    >
+      {events.length === 0 ? (
+        <Empty>No transitions recorded yet.</Empty>
+      ) : (
+        <ul className="divide-y divide-hairline/60">
+          {events.map((ev) => {
+            const meta = STATE_META[ev.to_state as SandboxState];
+            return (
+              <li key={ev.id} className="flex items-center gap-3 px-4 py-2">
+                <span
+                  aria-hidden
+                  className="size-2 shrink-0 rounded-full"
+                  style={{ background: meta?.color ?? "var(--color-idle)" }}
+                />
+                <span className="min-w-0 flex-1 text-[13px] text-ink">
+                  {meta?.label ?? ev.to_state}
+                  {ev.from_state && (
+                    <span className="ml-2 font-mono text-[11px] text-faint">
+                      from {ev.from_state}
+                    </span>
+                  )}
+                </span>
+                <span className="shrink-0 font-mono text-[11px] text-faint">
+                  {fmtAge(ev.at)} ago
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
   );
 }
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -648,6 +649,203 @@ func TestServerListDir(t *testing.T) {
 	}
 	if w := callAs(h, "tok2", http.MethodGet, "/v0/sandboxes/"+sb.ID+"/files?op=list&path=/", nil); w.Code != http.StatusNotFound {
 		t.Errorf("cross-tenant list = %d, want 404", w.Code)
+	}
+}
+
+// TestSandboxEventsEndpoint pins the lifecycle timeline: newest-first
+// ordering, the id cursor, owner scoping, and error detail on failures.
+func TestSandboxEventsEndpoint(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/pause", nil)
+	call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resume", nil)
+
+	type page struct {
+		Events []struct {
+			ID        int64          `json:"id"`
+			SandboxID string         `json:"sandbox_id"`
+			FromState string         `json:"from_state"`
+			ToState   string         `json:"to_state"`
+			Detail    map[string]any `json:"detail"`
+		} `json:"events"`
+		NextBefore int64 `json:"next_before"`
+	}
+	get := func(path string) page {
+		t.Helper()
+		w := call(h, http.MethodGet, path, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d: %s", path, w.Code, w.Body)
+		}
+		var p page
+		_ = json.Unmarshal(w.Body.Bytes(), &p)
+		return p
+	}
+
+	full := get("/v0/sandboxes/" + sb.ID + "/events")
+	// create + pause + resume leave at least 4 transitions behind.
+	if len(full.Events) < 4 {
+		t.Fatalf("events = %d, want ≥4", len(full.Events))
+	}
+	if full.Events[0].ToState != "RUNNING" || full.Events[1].ToState != "RESUMING" {
+		t.Errorf("newest-first violated: %v %v", full.Events[0].ToState, full.Events[1].ToState)
+	}
+	for i := 1; i < len(full.Events); i++ {
+		if full.Events[i].ID >= full.Events[i-1].ID {
+			t.Fatalf("ids not strictly descending at %d", i)
+		}
+	}
+
+	// Cursor: walking limit=1 pages reproduces the full list.
+	var walked []int64
+	next := int64(0)
+	for range len(full.Events) {
+		path := "/v0/sandboxes/" + sb.ID + "/events?limit=1"
+		if next > 0 {
+			path += "&before=" + strconv.FormatInt(next, 10)
+		}
+		p := get(path)
+		if len(p.Events) != 1 {
+			break
+		}
+		walked = append(walked, p.Events[0].ID)
+		if p.NextBefore == 0 {
+			break
+		}
+		next = p.NextBefore
+	}
+	if len(walked) != len(full.Events) {
+		t.Errorf("cursor walk saw %d events, want %d", len(walked), len(full.Events))
+	}
+
+	// Bad params 400; ownership 404; the fleet feed is owner-scoped.
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/events?limit=zero", nil); w.Code != http.StatusBadRequest {
+		t.Errorf("bad limit = %d, want 400", w.Code)
+	}
+	if w := callAs(h, "tok2", http.MethodGet, "/v0/sandboxes/"+sb.ID+"/events", nil); w.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant events = %d, want 404", w.Code)
+	}
+	wf := callAs(h, "tok2", http.MethodGet, "/v0/events", nil)
+	var bobFeed page
+	_ = json.Unmarshal(wf.Body.Bytes(), &bobFeed)
+	if len(bobFeed.Events) != 0 {
+		t.Errorf("bob's fleet feed sees alice's events: %d", len(bobFeed.Events))
+	}
+	aliceFeed := get("/v0/events")
+	if len(aliceFeed.Events) != len(full.Events) {
+		t.Errorf("alice fleet feed = %d, want %d", len(aliceFeed.Events), len(full.Events))
+	}
+
+	// Failed transitions carry their cause in detail.error.
+	failing := &cpMockAgent{createErr: fmt.Errorf("no kvm today")}
+	h2 := newTestServer(t, failing)
+	w = call(h2, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h2, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var failed struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &failed)
+	if failed.ID != "" {
+		w = call(h2, http.MethodGet, "/v0/sandboxes/"+failed.ID+"/events", nil)
+		var p page
+		_ = json.Unmarshal(w.Body.Bytes(), &p)
+		found := false
+		for _, e := range p.Events {
+			if e.ToState == "FAILED" && e.Detail != nil && e.Detail["error"] != nil {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no FAILED event with detail.error: %s", w.Body)
+		}
+	}
+}
+
+// TestProxySessionCookie pins the iframe auth path: the cookie works on
+// proxy routes only, ownership still applies, and revocation sticks.
+func TestProxySessionCookie(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("guest-ok"))
+	}))
+	defer guest.Close()
+	h := newTestServer(t, &cpDialerAgent{addr: strings.TrimPrefix(guest.URL, "http://")})
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	// Mint a session as alice.
+	w = call(h, http.MethodPost, "/v0/proxy-session", nil)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("mint = %d: %s", w.Code, w.Body)
+	}
+	var cookie string
+	for _, sc := range w.Result().Cookies() {
+		if sc.Name == "embervm_proxy" {
+			cookie = sc.Value
+			if !sc.HttpOnly || sc.SameSite != http.SameSiteStrictMode {
+				t.Errorf("cookie flags: httponly=%v samesite=%v", sc.HttpOnly, sc.SameSite)
+			}
+		}
+	}
+	if cookie == "" {
+		t.Fatal("no embervm_proxy cookie set")
+	}
+
+	// Cookie-only request (no Authorization header — the iframe case).
+	cookieCall := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		ctx, cancel := context.WithCancel(req.Context())
+		defer cancel()
+		req = req.WithContext(ctx)
+		req.AddCookie(&http.Cookie{Name: "embervm_proxy", Value: cookie})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if w := cookieCall(http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/"); w.Code != http.StatusOK || w.Body.String() != "guest-ok" {
+		t.Errorf("cookie proxy = %d %q, want 200 guest-ok", w.Code, w.Body)
+	}
+	// The cookie must NOT authorize anything outside /proxy/.
+	if w := cookieCall(http.MethodGet, "/v0/sandboxes"); w.Code != http.StatusUnauthorized {
+		t.Errorf("cookie on API route = %d, want 401", w.Code)
+	}
+	if w := cookieCall(http.MethodGet, "/v0/sandboxes/"+sb.ID+"/files?path=/etc/hosts"); w.Code != http.StatusUnauthorized {
+		t.Errorf("cookie on files route = %d, want 401", w.Code)
+	}
+	// Ownership still enforced through the cookie: bob's session, alice's box.
+	w = callAs(h, "tok2", http.MethodPost, "/v0/proxy-session", nil)
+	var bobCookie string
+	for _, sc := range w.Result().Cookies() {
+		if sc.Name == "embervm_proxy" {
+			bobCookie = sc.Value
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/", nil)
+	req.AddCookie(&http.Cookie{Name: "embervm_proxy", Value: bobCookie})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("bob's cookie on alice's sandbox = %d, want 404", rec.Code)
+	}
+
+	// Revocation.
+	reqDel := httptest.NewRequest(http.MethodDelete, "/v0/proxy-session", nil)
+	reqDel.Header.Set("Authorization", "Bearer tok")
+	reqDel.AddCookie(&http.Cookie{Name: "embervm_proxy", Value: cookie})
+	h.ServeHTTP(httptest.NewRecorder(), reqDel)
+	if w := cookieCall(http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/"); w.Code != http.StatusUnauthorized {
+		t.Errorf("revoked cookie = %d, want 401", w.Code)
 	}
 }
 

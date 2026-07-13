@@ -5,6 +5,7 @@ import { clearToken, getToken } from "./api/client";
 import { ToastViewport } from "./components/toast";
 import { TooltipProvider } from "./components/tooltip";
 import { ErrorBoundary } from "./components/ui";
+import { endProxySession } from "./lib/proxy";
 import { disposeAllTerms } from "./lib/termBridge";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
@@ -119,6 +120,7 @@ export default function App() {
             <Sidebar
               onLogout={() => {
                 disposeAllTerms();
+                endProxySession();
                 clearToken();
                 qc.clear();
                 setAuthed(false);

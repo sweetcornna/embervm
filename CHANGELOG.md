@@ -72,6 +72,22 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   a guest directory (lstat metadata, symlink targets, dirs-first, 10 000
   entry cap) via a new `ListDir` verb through nodeapi/guestd; plain
   `GET /files` reads are unchanged.
+- **Preview & time travel (console phase 2)** — a **Preview tab** renders
+  any guest TCP port in an iframe through the existing WS-transparent
+  guest proxy (port chips + per-sandbox recent ports, open-in-new-tab);
+  since iframes cannot carry Authorization, `POST /v0/proxy-session`
+  trades the bearer token for an HttpOnly `SameSite=Strict` cookie that
+  the auth middleware honors **only on `/proxy/` routes** (ownership still
+  enforced per-sandbox; `DELETE` revokes). The **Checkpoints tab** became
+  a merged timeline — lifecycle transitions and checkpoints on one spine —
+  fed by new endpoints `GET /v0/sandboxes/:id/events` and `GET /v0/events`
+  (owner-scoped fleet feed; newest-first, id-cursor pagination, index in
+  migration 0007), with a **time-travel composer** that runs a command
+  with `checkpoint:true` so every step is a rollback anchor. Failed
+  transitions now record their cause (`detail.error` jsonb) and surface as
+  chips in the timeline. A **Settings tab** adds migrate-with-node-picker,
+  the RECYCLED restore-artifacts flow, a geometry readout, and the danger
+  zone; the Overview tab gained a recent-events card.
 
 - **Web console** — a management UI embedded in the apiserver binary
   (`pkg/webui` + `web/`, React + TypeScript, served at `/` with the SPA
