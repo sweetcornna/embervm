@@ -1,8 +1,23 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { fmtAge } from "../api/client";
-import { useTemplates, verbs } from "../api/hooks";
-import { Button, Card, Empty, ErrorNote, Field, Mono, PageHeader, Table, inputCls } from "../components/ui";
+import { useSandboxes, useTemplates, verbs } from "../api/hooks";
+import type { Template } from "../api/types";
+import {
+  Button,
+  Card,
+  ConfirmDialog,
+  Drawer,
+  Empty,
+  ErrorNote,
+  Field,
+  Mono,
+  PageHeader,
+  Table,
+  inputCls,
+} from "../components/ui";
+import { toast } from "../lib/toast";
 
 const TSTATE: Record<string, string> = {
   READY: "var(--color-ok)",
@@ -15,6 +30,8 @@ export function Templates() {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
+  const [detail, setDetail] = useState<Template | null>(null);
+  const [confirmDel, setConfirmDel] = useState<Template | null>(null);
 
   const build = useMutation({
     mutationFn: () => verbs.createTemplate(name.trim(), image.trim()),
@@ -26,6 +43,8 @@ export function Templates() {
   });
   const del = useMutation({
     mutationFn: (id: string) => verbs.deleteTemplate(id),
+    onSuccess: () => toast.success("Template deleted"),
+    onError: (err) => toast.error("Delete failed", err.message),
     onSettled: () => void qc.invalidateQueries({ queryKey: ["templates"] }),
   });
 
@@ -73,7 +92,11 @@ export function Templates() {
       <Table head={["Name", "Image", "State", "Age", ""]}>
         {(data ?? []).map((t) => (
           <tr key={t.id} className="border-b border-hairline last:border-0 hover:bg-raised/40">
-            <td className="px-4 py-2.5 font-medium text-ink">{t.name}</td>
+            <td className="px-4 py-2.5">
+              <button className="font-medium text-ink hover:text-accent" onClick={() => setDetail(t)}>
+                {t.name}
+              </button>
+            </td>
             <td className="px-4 py-2.5">
               <Mono className="text-muted">{t.image}</Mono>
             </td>
@@ -94,13 +117,7 @@ export function Templates() {
               <Mono className="text-muted tabular-nums">{fmtAge(t.created_at)}</Mono>
             </td>
             <td className="px-4 py-2.5 text-right">
-              <Button
-                size="sm"
-                kind="danger"
-                onClick={() => {
-                  if (window.confirm(`Delete template "${t.name}"?`)) del.mutate(t.id);
-                }}
-              >
+              <Button size="sm" kind="danger" onClick={() => setConfirmDel(t)}>
                 Delete
               </Button>
             </td>
@@ -111,6 +128,76 @@ export function Templates() {
         <Empty>No templates. Build one from a container image above.</Empty>
       )}
       {isLoading && <Empty>Loading…</Empty>}
+
+      <Drawer title={detail ? `Template ${detail.name}` : "Template"} open={detail !== null} onClose={() => setDetail(null)}>
+        {detail && <TemplateDetail template={detail} onDelete={() => setConfirmDel(detail)} />}
+      </Drawer>
+      <ConfirmDialog
+        open={confirmDel !== null}
+        title="Delete template"
+        body={
+          <>
+            Delete <Mono className="text-ink">{confirmDel?.name}</Mono>? Sandboxes already built from
+            it keep running; new sandboxes can no longer use it.
+          </>
+        }
+        confirmLabel="Delete template"
+        busy={del.isPending}
+        onConfirm={() => {
+          if (confirmDel) del.mutate(confirmDel.id);
+          setConfirmDel(null);
+          setDetail(null);
+        }}
+        onClose={() => setConfirmDel(null)}
+      />
+    </div>
+  );
+}
+
+function TemplateDetail(props: { template: Template; onDelete: () => void }) {
+  const { template: t } = props;
+  const sandboxes = useSandboxes();
+  const usedBy = (sandboxes.data ?? []).filter((sb) => sb.template_id === t.id);
+  const rows: Array<[string, string]> = [
+    ["id", t.id],
+    ["image", t.image],
+    ["state", t.state.toLowerCase()],
+    ["created", `${fmtAge(t.created_at)} ago`],
+    ...(t.ready_at ? ([["ready", `${fmtAge(t.ready_at)} ago`]] as Array<[string, string]>) : []),
+  ];
+  return (
+    <div className="space-y-5">
+      <dl className="grid grid-cols-1 gap-2.5">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-3">
+            <dt className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">{k}</dt>
+            <dd className="min-w-0 break-all text-right font-mono text-[12px] text-ink">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {t.error && <ErrorNote error={new Error(t.error)} />}
+      <div>
+        <h3 className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+          Sandboxes using it ({usedBy.length})
+        </h3>
+        {usedBy.length === 0 ? (
+          <Empty>None yet.</Empty>
+        ) : (
+          <ul className="divide-y divide-hairline overflow-hidden rounded-md border border-hairline">
+            {usedBy.map((sb) => (
+              <li key={sb.id} className="px-3 py-2">
+                <Link to={`/sandboxes/${sb.id}`} className="font-mono text-[12px] hover:text-accent">
+                  {sb.id.slice(0, 8)}
+                </Link>
+                <span className="ml-2 font-mono text-[11px] text-faint">{sb.state.toLowerCase()}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <Button kind="danger" onClick={props.onDelete}>
+        Delete template
+      </Button>
     </div>
   );
 }

@@ -164,7 +164,15 @@ export function PreviewTab(props: { sb: Sandbox }) {
             src={src}
             title={`Guest port ${port}`}
             className="h-full w-full border-0 bg-white"
-            sandbox="allow-scripts allow-forms allow-same-origin allow-downloads"
+            // The proxy is same-origin with the console, so allow-same-origin
+            // would give guest-served (untrusted, agent-controlled) scripts
+            // the console's origin — i.e. read of the bearer token in
+            // localStorage and reach into the parent DOM. Omitting it forces
+            // an opaque origin: scripts still run (preview works, HMR
+            // WebSockets included — those are URL-based network requests), but
+            // they cannot touch the console. Downloads are likewise dropped
+            // (they would inherit the origin).
+            sandbox="allow-scripts allow-forms"
           />
         )}
       </div>

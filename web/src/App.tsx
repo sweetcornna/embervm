@@ -8,6 +8,7 @@ import { ErrorBoundary } from "./components/ui";
 import { endProxySession } from "./lib/proxy";
 import { disposeAllTerms } from "./lib/termBridge";
 import { Login } from "./pages/Login";
+import { Nodes } from "./pages/Nodes";
 import { Overview } from "./pages/Overview";
 import { Sandboxes } from "./pages/Sandboxes";
 import { Storage } from "./pages/Storage";
@@ -21,6 +22,7 @@ const qc = new QueryClient({
 const NAV = [
   { to: "/", label: "Overview", end: true },
   { to: "/sandboxes", label: "Sandboxes" },
+  { to: "/nodes", label: "Nodes" },
   { to: "/templates", label: "Templates" },
   { to: "/storage", label: "Storage" },
 ];
@@ -91,6 +93,7 @@ function Routed() {
             <Routes>
               <Route path="/" element={<Overview />} />
               <Route path="/sandboxes" element={<Sandboxes />} />
+              <Route path="/nodes" element={<Nodes />} />
               <Route path="/templates" element={<Templates />} />
               <Route path="/storage" element={<Storage />} />
               <Route path="*" element={<Navigate to="/" replace />} />

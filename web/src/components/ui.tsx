@@ -254,6 +254,80 @@ export function useConfirm() {
   };
 }
 
+/* ── Drawer (right-hand detail panel) ────────────────────────────────── */
+export function Drawer(props: {
+  title: ReactNode;
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const d = ref.current;
+    if (!d) return;
+    if (props.open && !d.open) d.showModal();
+    if (!props.open && d.open) d.close();
+  }, [props.open]);
+  return (
+    <dialog
+      ref={ref}
+      onClose={props.onClose}
+      onClick={(e) => {
+        if (e.target === ref.current) props.onClose();
+      }}
+      className="enter-up fixed inset-y-0 right-0 m-0 ml-auto h-dvh max-h-dvh w-[min(30rem,92vw)] border-l border-border bg-surface p-0 text-ink shadow-2xl backdrop:bg-black/60 backdrop:backdrop-blur-[2px]"
+    >
+      <div className="flex h-full flex-col">
+        <div className="flex items-center justify-between border-b border-hairline px-5 py-3.5">
+          <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">{props.title}</h2>
+          <button
+            onClick={props.onClose}
+            aria-label="Close"
+            className="rounded px-1.5 py-0.5 text-muted hover:bg-raised hover:text-ink"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">{props.children}</div>
+      </div>
+    </dialog>
+  );
+}
+
+/* ── Capacity bar (nodes) ────────────────────────────────────────────── */
+export function CapacityBar(props: {
+  label: string;
+  used: number;
+  total: number;
+  fmt: (n: number) => string;
+}) {
+  const boundless = props.total <= 0;
+  const pct = boundless ? 0 : Math.min(100, (props.used / props.total) * 100);
+  const hot = pct >= 85;
+  return (
+    <div>
+      <div className="flex justify-between font-mono text-[11px] text-muted tabular-nums">
+        <span>{props.label}</span>
+        <span>
+          <span className="text-ink">{props.fmt(props.used)}</span>
+          {boundless ? <span className="text-faint"> · unlimited</span> : ` / ${props.fmt(props.total)}`}
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-overlay">
+        {!boundless && (
+          <div
+            className="h-full rounded-full transition-[width] duration-500"
+            style={{
+              width: `${Math.max(pct > 0 ? 3 : 0, pct)}%`,
+              background: hot ? "var(--color-danger)" : "var(--color-accent)",
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ── Skeleton / KBD / IconButton ─────────────────────────────────────── */
 export function Skeleton(props: { className?: string }) {
   return (

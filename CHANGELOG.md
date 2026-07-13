@@ -87,7 +87,21 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   transitions now record their cause (`detail.error` jsonb) and surface as
   chips in the timeline. A **Settings tab** adds migrate-with-node-picker,
   the RECYCLED restore-artifacts flow, a geometry readout, and the danger
-  zone; the Overview tab gained a recent-events card.
+  zone; the Overview tab gained a recent-events card. The Preview iframe is
+  sandboxed **without** `allow-same-origin` — the proxy is same-origin with
+  the console, so granting it would let untrusted guest scripts read the
+  bearer token from the console's `localStorage`; an opaque origin keeps
+  the preview working while isolating it.
+- **Fleet cockpit (console phase 3)** — a dedicated **Nodes page** (capacity
+  cards + a detail drawer listing each node's sandboxes). The **Sandboxes**
+  list gained search, state-filter chips, sortable columns, and a per-row
+  `⋯` menu (open/pause/resume/fork/kill with optimistic updates + toasts).
+  **Overview** gained a legend-filtered fleet grid, a live activity feed
+  (`GET /v0/events`), node cards linking to the Nodes page, and skeletons.
+  **Storage** added a stored-bytes-by-tier stacked bar and sortable
+  columns; **Templates** got a detail drawer (sandboxes-using-it) and a
+  confirm dialog. The create-sandbox dialog was extracted so the Sandboxes
+  page and the Overview empty state share it.
 
 - **Web console** — a management UI embedded in the apiserver binary
   (`pkg/webui` + `web/`, React + TypeScript, served at `/` with the SPA
