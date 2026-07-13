@@ -8,8 +8,33 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+## [v0.7.0] — 2026-07-14 — Console workbench — **v0.4**
+
+The embedded console becomes a **complete workbench**: a per-sandbox
+IDE-style workspace (interactive terminal, file browser + editor, port
+preview, live pressure gauges, a merged checkpoint/lifecycle timeline with
+time-travel exec) plus a fleet operations cockpit (Nodes page, activity
+feed, richer sandbox/storage/template views, a ⌘K command palette). Ships
+five new bearer-authenticated endpoints (`…/term` WS PTY, `…/health`,
+`…/events` + `/v0/events`, `…/files?op=list`, `POST/DELETE /v0/proxy-session`)
+and one new Go dep (`github.com/coder/websocket`, guestd side). All
+additions are backward-compatible; no wire or on-disk format changed.
+
 ### Fixed
 
+- **Platform credentials leaked into untrusted guests (security)** — two
+  paths let guest-controlled code obtain a usable EmberVM credential.
+  (1) The Preview tab's "open in new tab" navigated a top-level window to
+  the same-origin guest-proxy URL; a top-level document is not covered by
+  the iframe `sandbox`, so guest scripts ran at the console's origin and
+  could read the bearer token from `localStorage`. The affordance was
+  removed — preview stays inside the opaque-origin sandboxed iframe.
+  (2) `proxyGuest`/`termSandbox` forwarded the `embervm_proxy` session
+  cookie (and any `Authorization` header) verbatim into the guest; an
+  untrusted guest could capture the 8 h owner-scoped cookie and replay it
+  against the owner's other sandboxes' proxy ports. Both handlers now strip
+  `Cookie` + `Authorization` before forwarding (mirroring the existing
+  `Sec-WebSocket-Protocol` bearer stripping in `Auth()`).
 - **Console blank-screen on Storage (and future render throws)** — the
   storage-report endpoint returns an object (`{sandboxes, total_*}`), but
   the console typed it as an array and called `.reduce`, throwing and —
@@ -74,7 +99,7 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   `GET /files` reads are unchanged.
 - **Preview & time travel (console phase 2)** — a **Preview tab** renders
   any guest TCP port in an iframe through the existing WS-transparent
-  guest proxy (port chips + per-sandbox recent ports, open-in-new-tab);
+  guest proxy (port chips + per-sandbox recent ports);
   since iframes cannot carry Authorization, `POST /v0/proxy-session`
   trades the bearer token for an HttpOnly `SameSite=Strict` cookie that
   the auth middleware honors **only on `/proxy/` routes** (ownership still
@@ -91,7 +116,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   sandboxed **without** `allow-same-origin` — the proxy is same-origin with
   the console, so granting it would let untrusted guest scripts read the
   bearer token from the console's `localStorage`; an opaque origin keeps
-  the preview working while isolating it.
+  the preview working while isolating it (see the Fixed section for the
+  companion new-tab / credential-forwarding hardening).
 - **Fleet cockpit (console phase 3)** — a dedicated **Nodes page** (capacity
   cards + a detail drawer listing each node's sandboxes). The **Sandboxes**
   list gained search, state-filter chips, sortable columns, and a per-row
