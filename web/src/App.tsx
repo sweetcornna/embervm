@@ -2,10 +2,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { HashRouter, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { clearToken, getToken } from "./api/client";
+import { LangToggle } from "./components/langToggle";
 import { CommandPalette } from "./components/palette";
 import { ToastViewport } from "./components/toast";
 import { TooltipProvider } from "./components/tooltip";
 import { ErrorBoundary, KBD } from "./components/ui";
+import { useI18n } from "./lib/i18n";
 import { endProxySession } from "./lib/proxy";
 import { disposeAllTerms } from "./lib/termBridge";
 import { Login } from "./pages/Login";
@@ -21,14 +23,15 @@ const qc = new QueryClient({
 });
 
 const NAV = [
-  { to: "/", label: "Overview", end: true },
-  { to: "/sandboxes", label: "Sandboxes" },
-  { to: "/nodes", label: "Nodes" },
-  { to: "/templates", label: "Templates" },
-  { to: "/storage", label: "Storage" },
+  { to: "/", label: "Overview", zh: "总览", end: true },
+  { to: "/sandboxes", label: "Sandboxes", zh: "沙箱" },
+  { to: "/nodes", label: "Nodes", zh: "节点" },
+  { to: "/templates", label: "Templates", zh: "模板" },
+  { to: "/storage", label: "Storage", zh: "存储" },
 ];
 
 function Sidebar(props: { onLogout: () => void }) {
+  const { t } = useI18n();
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-hairline bg-surface">
       <div className="flex items-center gap-2.5 border-b border-hairline px-4 py-3.5">
@@ -41,7 +44,9 @@ function Sidebar(props: { onLogout: () => void }) {
         </span>
         <div className="leading-tight">
           <div className="text-[15px] font-semibold tracking-tight">EmberVM</div>
-          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-faint">console</div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-faint">
+            {t("console", "控制台")}
+          </div>
         </div>
       </div>
       <nav className="flex flex-col gap-0.5 p-2">
@@ -58,20 +63,20 @@ function Sidebar(props: { onLogout: () => void }) {
               }`
             }
           >
-            {n.label}
+            {t(n.label, n.zh)}
           </NavLink>
         ))}
       </nav>
       <div className="mt-auto space-y-1 border-t border-hairline p-3">
-        <div className="flex items-center justify-between px-2.5 py-1 text-[11px] text-faint">
-          <span>Command palette</span>
+        <div className="flex items-center justify-between px-2.5 py-1">
+          <LangToggle />
           <KBD>⌘K</KBD>
         </div>
         <button
           onClick={props.onLogout}
           className="w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted hover:bg-raised hover:text-ink"
         >
-          Sign out
+          {t("Sign out", "退出登录")}
         </button>
       </div>
     </aside>

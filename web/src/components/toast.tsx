@@ -2,6 +2,7 @@
 // swipe dismiss, focus hotkey). Mount once in App.
 
 import { Toast as RadixToast } from "radix-ui";
+import { useI18n } from "../lib/i18n";
 import { dismiss, useToasts } from "../lib/toast";
 import { IconCheck, IconClose, IconInfo, IconWarn } from "./icons";
 
@@ -12,17 +13,18 @@ const KIND_META = {
 } as const;
 
 export function ToastViewport() {
+  const { t } = useI18n();
   const toasts = useToasts();
   return (
     <RadixToast.Provider swipeDirection="right" duration={Infinity}>
-      {toasts.map((t) => {
-        const m = KIND_META[t.kind];
+      {toasts.map((item) => {
+        const m = KIND_META[item.kind];
         return (
           <RadixToast.Root
-            key={t.id}
+            key={item.id}
             duration={Infinity /* lifetime owned by lib/toast */}
             onOpenChange={(open) => {
-              if (!open) dismiss(t.id);
+              if (!open) dismiss(item.id);
             }}
             className="enter-up pointer-events-auto flex items-start gap-2.5 rounded-md border border-border bg-raised px-3.5 py-3 shadow-[var(--shadow-overlay)]"
           >
@@ -31,27 +33,27 @@ export function ToastViewport() {
             </span>
             <div className="min-w-0 flex-1">
               <RadixToast.Title className="text-[13px] font-medium text-ink">
-                {t.title}
+                {item.title}
               </RadixToast.Title>
-              {t.detail && (
+              {item.detail && (
                 <RadixToast.Description className="mt-0.5 break-words text-xs text-muted">
-                  {t.detail}
+                  {item.detail}
                 </RadixToast.Description>
               )}
-              {t.action && (
+              {item.action && (
                 <button
                   onClick={() => {
-                    t.action?.onClick();
-                    dismiss(t.id);
+                    item.action?.onClick();
+                    dismiss(item.id);
                   }}
                   className="mt-1.5 text-xs font-medium text-accent hover:underline"
                 >
-                  {t.action.label}
+                  {item.action.label}
                 </button>
               )}
             </div>
             <RadixToast.Close
-              aria-label="Dismiss"
+              aria-label={t("Dismiss", "关闭")}
               className="shrink-0 rounded p-0.5 text-faint hover:bg-overlay hover:text-ink"
             >
               <IconClose size={13} />

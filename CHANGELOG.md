@@ -8,6 +8,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+### Added
+
+- **Bilingual console (English / 简体中文)** — the whole console UI is now
+  localizable, with a sidebar `EN | 中` toggle. A dependency-free i18n core
+  (`web/src/lib/i18n.ts`: module-level locale + `useSyncExternalStore`,
+  bilingual `t("English", "中文")` at each call site, persisted in
+  `localStorage`, defaulting to the browser language) drives every page,
+  workspace tab, dialog, toast, menu, empty/error state, and the lifecycle
+  status labels. Technical values (API field names, IDs, monospace command
+  examples, state enums on the wire) stay verbatim. No new dependency; the
+  offline-bundle guarantee is unchanged.
+
 ## [v0.7.0] — 2026-07-14 — Console workbench — **v0.4**
 
 The embedded console becomes a **complete workbench**: a per-sandbox

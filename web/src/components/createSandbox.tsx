@@ -7,9 +7,11 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTemplates, verbs } from "../api/hooks";
 import type { CreateSandboxRequest } from "../api/types";
+import { useI18n } from "../lib/i18n";
 import { Button, Dialog, ErrorNote, Field, Toggle, inputCls } from "./ui";
 
 export function CreateSandboxDialog(props: { open: boolean; onClose: () => void }) {
+  const { t } = useI18n();
   const templates = useTemplates();
   const qc = useQueryClient();
   const nav = useNavigate();
@@ -56,24 +58,24 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
   }
 
   return (
-    <Dialog title="New sandbox" open={props.open} onClose={props.onClose}>
+    <Dialog title={t("New sandbox", "新建沙箱")} open={props.open} onClose={props.onClose}>
       <form onSubmit={submit} className="space-y-4">
-        <Field label="Template">
+        <Field label={t("Template", "模板")}>
           <select
             className={inputCls}
             value={form.template_id || ready[0]?.id || ""}
             onChange={(e) => set("template_id", e.target.value)}
           >
-            {ready.length === 0 && <option value="">No READY templates — build one first</option>}
-            {ready.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name} ({t.image})
+            {ready.length === 0 && <option value="">{t("No READY templates — build one first", "暂无 READY 模板 —— 请先构建一个")}</option>}
+            {ready.map((tpl) => (
+              <option key={tpl.id} value={tpl.id}>
+                {tpl.name} ({tpl.image})
               </option>
             ))}
           </select>
         </Field>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="vCPUs">
+          <Field label={t("vCPUs", "vCPU 数")}>
             <input
               className={inputCls}
               type="number"
@@ -83,7 +85,7 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
               onChange={(e) => set("vcpus", Number(e.target.value))}
             />
           </Field>
-          <Field label="Memory MiB">
+          <Field label={t("Memory MiB", "内存 MiB")}>
             <input
               className={inputCls}
               type="number"
@@ -93,7 +95,7 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
               onChange={(e) => set("memory_mib", Number(e.target.value))}
             />
           </Field>
-          <Field label="Disk GiB">
+          <Field label={t("Disk GiB", "磁盘 GiB")}>
             <input
               className={inputCls}
               type="number"
@@ -109,11 +111,11 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
           <Toggle
             checked={form.resizable}
             onChange={(v) => set("resizable", v)}
-            label="Resizable at runtime"
+            label={t("Resizable at runtime", "运行时可调整规格")}
           />
           {form.resizable && (
             <div className="mt-3 grid grid-cols-2 gap-3 border-t border-hairline pt-3">
-              <Field label="Max memory MiB" hint="Rounded up to 128 MiB slots.">
+              <Field label={t("Max memory MiB", "最大内存 MiB")} hint={t("Rounded up to 128 MiB slots.", "向上取整到 128 MiB 的槽位。")}>
                 <input
                   className={inputCls}
                   type="number"
@@ -123,7 +125,7 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
                   onChange={(e) => set("max_memory_mib", Number(e.target.value))}
                 />
               </Field>
-              <Field label="Max vCPUs">
+              <Field label={t("Max vCPUs", "最大 vCPU")}>
                 <input
                   className={inputCls}
                   type="number"
@@ -137,29 +139,29 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
                 <Toggle
                   checked={form.autoscale}
                   onChange={(v) => set("autoscale", v)}
-                  label="Autoscale on guest pressure"
+                  label={t("Autoscale on guest pressure", "按 guest 压力自动伸缩")}
                 />
               </div>
             </div>
           )}
         </div>
 
-        <Field label="Egress">
+        <Field label={t("Egress", "出网")}>
           <select
             className={inputCls}
             value={form.egress}
             onChange={(e) => set("egress", e.target.value as "nat" | "none")}
           >
-            <option value="nat">nat — outbound internet</option>
-            <option value="none">none — no outbound network</option>
+            <option value="nat">{t("nat — outbound internet", "nat — 可出公网")}</option>
+            <option value="none">{t("none — no outbound network", "none — 无出网")}</option>
           </select>
         </Field>
 
         <ErrorNote error={create.error} />
         <div className="flex justify-end gap-2">
-          <Button onClick={props.onClose}>Cancel</Button>
+          <Button onClick={props.onClose}>{t("Cancel", "取消")}</Button>
           <Button kind="primary" type="submit" busy={create.isPending} disabled={ready.length === 0}>
-            Create sandbox
+            {t("Create sandbox", "创建沙箱")}
           </Button>
         </div>
       </form>

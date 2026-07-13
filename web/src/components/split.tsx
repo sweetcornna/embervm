@@ -3,6 +3,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useRef, useState } from "react";
+import { useI18n } from "../lib/i18n";
 
 export function SplitPane(props: {
   left: ReactNode;
@@ -12,6 +13,7 @@ export function SplitPane(props: {
   minLeft?: number;
   minRight?: number;
 }) {
+  const { t } = useI18n();
   const { minLeft = 200, minRight = 380, defaultLeft = 280 } = props;
   const key = `embervm.split.${props.storageKey}`;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -59,7 +61,7 @@ export function SplitPane(props: {
         aria-orientation="vertical"
         aria-valuenow={Math.round(leftW)}
         aria-valuemin={minLeft}
-        aria-label="Resize panels"
+        aria-label={t("Resize panels", "调整面板")}
         tabIndex={0}
         onPointerDown={onPointerDown}
         onKeyDown={(e) => {

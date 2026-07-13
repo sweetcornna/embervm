@@ -7,6 +7,7 @@ import type { Sandbox } from "../../api/types";
 import { IconClose, IconPlus, IconTerminal } from "../../components/icons";
 import { Tip } from "../../components/tooltip";
 import { Button, Empty } from "../../components/ui";
+import { useI18n } from "../../lib/i18n";
 import type { TermSession } from "../../lib/term";
 import { TermManager, useTermSessions } from "../../lib/term";
 
@@ -19,6 +20,7 @@ const STATUS_COLOR: Record<TermSession["status"], string> = {
 
 export function TerminalTab(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const sessions = useTermSessions(sb.id);
   const [activeID, setActiveID] = useState<string | null>(null);
   const active =
@@ -38,8 +40,10 @@ export function TerminalTab(props: { sb: Sandbox }) {
       <Empty>
         <div className="mx-auto max-w-sm space-y-2">
           <IconTerminal size={22} className="mx-auto text-faint" />
-          <p>The interactive shell needs a running guest.</p>
-          <p className="text-faint">Resume the sandbox from the header to open a terminal.</p>
+          <p>{t("The interactive shell needs a running guest.", "交互式 shell 需要运行中的 guest。")}</p>
+          <p className="text-faint">
+            {t("Resume the sandbox from the header to open a terminal.", "从顶部恢复沙箱即可打开终端。")}
+          </p>
         </div>
       </Empty>
     );
@@ -62,11 +66,11 @@ export function TerminalTab(props: { sb: Sandbox }) {
               />
               <span className="font-mono">{s.title}</span>
               {s.status === "reconnecting" && (
-                <span className="font-mono text-[10px] text-transit">reconnecting…</span>
+                <span className="font-mono text-[10px] text-transit">{t("reconnecting…", "重连中…")}</span>
               )}
             </button>
             <button
-              aria-label={`Close ${s.title}`}
+              aria-label={`${t("Close", "关闭")} ${s.title}`}
               onClick={() => {
                 TermManager.close(sb.id, s.id);
                 if (activeID === s.id) setActiveID(null);
@@ -77,9 +81,15 @@ export function TerminalTab(props: { sb: Sandbox }) {
             </button>
           </div>
         ))}
-        <Tip content={running ? "New shell session" : "Needs a running guest"}>
+        <Tip
+          content={
+            running
+              ? t("New shell session", "新建 shell 会话")
+              : t("Needs a running guest", "需要运行中的 guest")
+          }
+        >
           <button
-            aria-label="New session"
+            aria-label={t("New session", "新建会话")}
             disabled={!running}
             onClick={() => {
               const s = TermManager.open(sb.id);
@@ -95,14 +105,15 @@ export function TerminalTab(props: { sb: Sandbox }) {
         {active ? (
           <TermMount key={active.id} session={active} />
         ) : (
-          <Empty>No open sessions — start one with the + button.</Empty>
+          <Empty>{t("No open sessions — start one with the + button.", "暂无会话 —— 用 + 按钮新建。")}</Empty>
         )}
         {active?.status === "closed" && (
           <div className="absolute inset-x-0 bottom-4 flex justify-center">
             <div className="flex items-center gap-3 rounded-md border border-border bg-raised px-3 py-2 text-[12px] text-muted shadow-[var(--shadow-overlay)]">
-              process exited{active.exitCode !== undefined ? ` (${active.exitCode})` : ""}
+              {t("process exited", "进程已退出")}
+              {active.exitCode !== undefined ? ` (${active.exitCode})` : ""}
               <Button size="sm" onClick={() => TermManager.restart(sb.id, active.id)} disabled={!running}>
-                Restart session
+                {t("Restart session", "重启会话")}
               </Button>
             </div>
           </div>
