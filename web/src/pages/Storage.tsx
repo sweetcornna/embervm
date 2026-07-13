@@ -30,7 +30,7 @@ export function Storage() {
   const byTier = useMemo(() => {
     const m = new Map<string, number>();
     for (const r of sandboxes) m.set(r.tier, (m.get(r.tier) ?? 0) + r.stored_bytes);
-    return TIER_ORDER.map((t) => ({ tier: t, bytes: m.get(t) ?? 0 })).filter((x) => x.bytes > 0);
+    return TIER_ORDER.map((tier) => ({ tier, bytes: m.get(tier) ?? 0 })).filter((x) => x.bytes > 0);
   }, [sandboxes]);
   const tierTotal = byTier.reduce((n, x) => n + x.bytes, 0);
 
@@ -69,25 +69,25 @@ export function Storage() {
         <Card title={t("Stored bytes by tier", "按层级的存储字节")}>
           <div className="space-y-2">
             <div className="flex h-3 w-full overflow-hidden rounded-full bg-overlay">
-              {byTier.map((t, i) => (
+              {byTier.map((row, i) => (
                 <div
-                  key={t.tier}
+                  key={row.tier}
                   className="h-full"
                   style={{
-                    width: `${(t.bytes / tierTotal) * 100}%`,
-                    background: TIER_COLOR[t.tier],
+                    width: `${(row.bytes / tierTotal) * 100}%`,
+                    background: TIER_COLOR[row.tier],
                     marginLeft: i === 0 ? 0 : 2,
                   }}
-                  title={`${t.tier}: ${fmtBytes(t.bytes)}`}
+                  title={`${row.tier}: ${fmtBytes(row.bytes)}`}
                 />
               ))}
             </div>
             <div className="flex flex-wrap gap-x-4 gap-y-1">
-              {byTier.map((t) => (
-                <span key={t.tier} className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted">
-                  <span className="inline-block size-1.5 rounded-full" style={{ background: TIER_COLOR[t.tier] }} />
-                  {t.tier}
-                  <span className="tabular-nums text-ink">{fmtBytes(t.bytes)}</span>
+              {byTier.map((row) => (
+                <span key={row.tier} className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted">
+                  <span className="inline-block size-1.5 rounded-full" style={{ background: TIER_COLOR[row.tier] }} />
+                  {row.tier}
+                  <span className="tabular-nums text-ink">{fmtBytes(row.bytes)}</span>
                 </span>
               ))}
             </div>
