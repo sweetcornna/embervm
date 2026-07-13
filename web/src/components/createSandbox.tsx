@@ -15,7 +15,7 @@ export function CreateSandboxDialog(props: { open: boolean; onClose: () => void 
   const templates = useTemplates();
   const qc = useQueryClient();
   const nav = useNavigate();
-  const ready = (templates.data ?? []).filter((t) => t.state === "READY");
+  const ready = (templates.data ?? []).filter((tpl) => tpl.state === "READY");
 
   const [form, setForm] = useState({
     template_id: "",
