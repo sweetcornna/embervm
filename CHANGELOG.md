@@ -102,6 +102,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   columns; **Templates** got a detail drawer (sandboxes-using-it) and a
   confirm dialog. The create-sandbox dialog was extracted so the Sandboxes
   page and the Overview empty state share it.
+- **Command palette & polish (console phase 4)** — a `⌘K` command palette
+  (cmdk) to navigate, fuzzy-jump to any sandbox, create, and act on the
+  current workspace's sandbox; `g`-then-key navigation (`g o/s/n/t/g`), a
+  `?` shortcut-help overlay, and a sidebar `⌘K` hint. A `check:offline`
+  build step greps the built bundle for network-loading external URLs
+  (CSS `url()`/`@import`, HTML `src`/`href`) and fails `make web` if the
+  embed would ever fetch off-origin, enforcing the air-gap guarantee.
 
 - **Web console** — a management UI embedded in the apiserver binary
   (`pkg/webui` + `web/`, React + TypeScript, served at `/` with the SPA

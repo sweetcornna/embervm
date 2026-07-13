@@ -2,9 +2,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { HashRouter, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { clearToken, getToken } from "./api/client";
+import { CommandPalette } from "./components/palette";
 import { ToastViewport } from "./components/toast";
 import { TooltipProvider } from "./components/tooltip";
-import { ErrorBoundary } from "./components/ui";
+import { ErrorBoundary, KBD } from "./components/ui";
 import { endProxySession } from "./lib/proxy";
 import { disposeAllTerms } from "./lib/termBridge";
 import { Login } from "./pages/Login";
@@ -61,7 +62,11 @@ function Sidebar(props: { onLogout: () => void }) {
           </NavLink>
         ))}
       </nav>
-      <div className="mt-auto border-t border-hairline p-3">
+      <div className="mt-auto space-y-1 border-t border-hairline p-3">
+        <div className="flex items-center justify-between px-2.5 py-1 text-[11px] text-faint">
+          <span>Command palette</span>
+          <KBD>⌘K</KBD>
+        </div>
         <button
           onClick={props.onLogout}
           className="w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted hover:bg-raised hover:text-ink"
@@ -130,6 +135,7 @@ export default function App() {
               }}
             />
             <Routed />
+            <CommandPalette />
           </div>
         </HashRouter>
         <ToastViewport />
