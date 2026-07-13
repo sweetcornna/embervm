@@ -2,13 +2,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { HashRouter, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { clearToken, getToken } from "./api/client";
+import { ToastViewport } from "./components/toast";
+import { TooltipProvider } from "./components/tooltip";
 import { ErrorBoundary } from "./components/ui";
+import { disposeAllTerms } from "./lib/termBridge";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { SandboxDetail } from "./pages/SandboxDetail";
 import { Sandboxes } from "./pages/Sandboxes";
 import { Storage } from "./pages/Storage";
 import { Templates } from "./pages/Templates";
+import { Workspace } from "./pages/workspace/Workspace";
 
 const qc = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 2000 } },
@@ -69,21 +72,31 @@ function Sidebar(props: { onLogout: () => void }) {
 
 function Routed() {
   const loc = useLocation();
+  const workspace = /^\/sandboxes\/[^/]+/.test(loc.pathname);
   return (
     <main className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-6xl px-8 py-7">
-        {/* Keyed by path: a caught render error clears when you navigate. */}
-        <ErrorBoundary key={loc.pathname}>
-          <Routes>
-            <Route path="/" element={<Overview />} />
-            <Route path="/sandboxes" element={<Sandboxes />} />
-            <Route path="/sandboxes/:id" element={<SandboxDetail />} />
-            <Route path="/templates" element={<Templates />} />
-            <Route path="/storage" element={<Storage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </ErrorBoundary>
-      </div>
+      {/* Keyed by path: a caught render error clears when you navigate. The
+          workspace is full-bleed (terminal/editor need every pixel); other
+          pages keep the centered column. */}
+      <ErrorBoundary key={workspace ? loc.pathname.split("/").slice(0, 3).join("/") : loc.pathname}>
+        {workspace ? (
+          <div className="h-full">
+            <Routes>
+              <Route path="/sandboxes/:id/*" element={<Workspace />} />
+            </Routes>
+          </div>
+        ) : (
+          <div className="mx-auto max-w-6xl px-8 py-7">
+            <Routes>
+              <Route path="/" element={<Overview />} />
+              <Route path="/sandboxes" element={<Sandboxes />} />
+              <Route path="/templates" element={<Templates />} />
+              <Route path="/storage" element={<Storage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </div>
+        )}
+      </ErrorBoundary>
     </main>
   );
 }
@@ -100,18 +113,22 @@ export default function App() {
 
   return (
     <QueryClientProvider client={qc}>
-      <HashRouter>
-        <div className="flex h-dvh overflow-hidden">
-          <Sidebar
-            onLogout={() => {
-              clearToken();
-              qc.clear();
-              setAuthed(false);
-            }}
-          />
-          <Routed />
-        </div>
-      </HashRouter>
+      <TooltipProvider>
+        <HashRouter>
+          <div className="flex h-dvh overflow-hidden">
+            <Sidebar
+              onLogout={() => {
+                disposeAllTerms();
+                clearToken();
+                qc.clear();
+                setAuthed(false);
+              }}
+            />
+            <Routed />
+          </div>
+        </HashRouter>
+        <ToastViewport />
+      </TooltipProvider>
     </QueryClientProvider>
   );
 }

@@ -140,4 +140,6 @@ type Agent interface {
 	Health(ctx context.Context, sandboxID string) (*guestapi.HealthResponse, error)
 	ReadFile(ctx context.Context, sandboxID, path string) ([]byte, error)
 	WriteFile(ctx context.Context, sandboxID, path string, mode fs.FileMode, data []byte) error
+	// ListDir lists a guest directory (the console file browser).
+	ListDir(ctx context.Context, sandboxID, path string) (*guestapi.ListDirResponse, error)
 }

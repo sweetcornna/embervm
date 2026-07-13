@@ -61,6 +61,46 @@ export async function api<T>(
   return data as T;
 }
 
+/** Raw-body request for the /files endpoints (bytes, not JSON). Returns the
+    Response so callers stream or .arrayBuffer() as needed. */
+export async function apiRaw(
+  method: string,
+  path: string,
+  body?: BodyInit,
+  contentType?: string,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${getToken() ?? ""}`,
+  };
+  if (contentType) headers["Content-Type"] = contentType;
+  const resp = await fetch(`/v0${path}`, { method, headers, body });
+  if (resp.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event("embervm:unauthorized"));
+    throw new ApiError(401, "invalid or expired token");
+  }
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const data = (await resp.json()) as { error?: unknown };
+      if (data && data.error) msg = String(data.error);
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(resp.status, msg);
+  }
+  return resp;
+}
+
+/** base64url (no padding) — the token encoding for WS subprotocol auth
+    (browser WebSocket cannot set an Authorization header). */
+export function b64url(s: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(s)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
 /** Decode a Go []byte JSON field (base64) into text for display. */
 export function decodeBytes(b64?: string): string {
   if (!b64) return "";
@@ -93,4 +133,13 @@ export function fmtAge(iso: string): string {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
+}
+
+export function fmtKiB(kib: number): string {
+  return fmtBytes(kib * 1024);
+}
+
+export function fmtPct(fraction: number): string {
+  const pct = fraction * 100;
+  return `${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}%`;
 }

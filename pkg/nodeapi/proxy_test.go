@@ -10,6 +10,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 // dialerAgent is mockAgent plus the GuestDialer data path: DialGuest lands
@@ -64,6 +67,55 @@ func TestGuestProxyTwoHops(t *testing.T) {
 	}
 	if d.lastDial.id != "sb1" || d.lastDial.port != 8080 {
 		t.Errorf("dialed %+v", d.lastDial)
+	}
+}
+
+// TestGuestProxyWebSocketTwoHops pins the proxy's Upgrade transparency
+// across both hops (apiserver → node UDS → netns dial): the /term terminal
+// and any guest WS app depend on it, and until now only plain HTTP was
+// covered.
+func TestGuestProxyWebSocketTwoHops(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"echo.v1"}})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		_ = conn.Write(ctx, typ, data)
+		conn.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer guest.Close()
+
+	d := &dialerAgent{addr: strings.TrimPrefix(guest.URL, "http://")}
+	c := serveMock(t, d)
+	front := httptest.NewServer(c.GuestProxy("sb1", 8080))
+	defer front.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http")+"/ws",
+		&websocket.DialOptions{Subprotocols: []string{"echo.v1"}})
+	if err != nil {
+		t.Fatalf("ws dial through proxy: %v", err)
+	}
+	defer conn.CloseNow()
+	if got := conn.Subprotocol(); got != "echo.v1" {
+		t.Errorf("subprotocol = %q, want echo.v1 (must survive both hops)", got)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, []byte("ping")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	typ, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if typ != websocket.MessageText || string(data) != "ping" {
+		t.Errorf("echo = %v %q", typ, data)
 	}
 }
 

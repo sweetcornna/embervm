@@ -88,6 +88,25 @@ var (
 		Name: "embervm_migrations_total",
 		Help: "Explicit sandbox migrations, by result.",
 	}, []string{"result"})
+
+	// GuestHealthProbes counts console-driven guest health polls
+	// (ok/error/cached).
+	GuestHealthProbes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "embervm_guest_health_probes_total",
+		Help: "Guest health probes via /v0, by result.",
+	}, []string{"result"})
+
+	// TermSessionsActive is the number of interactive terminals open now.
+	TermSessionsActive = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "embervm_term_sessions_active",
+		Help: "Interactive terminal sessions currently open.",
+	})
+
+	// TermSessions counts terminal session attempts (ok/denied/error).
+	TermSessions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "embervm_term_sessions_total",
+		Help: "Interactive terminal sessions, by result.",
+	}, []string{"result"})
 )
 
 // Handler is the /metrics endpoint.

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -10,8 +11,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
 
 	"github.com/embervm/embervm/pkg/guestapi"
@@ -20,12 +24,14 @@ import (
 
 // cpMockAgent is a nodeapi.Agent that records calls for the handler tests.
 type cpMockAgent struct {
-	buildErr   error
-	createErr  error
-	snapSeq    int
-	lastFork   struct{ parent, layer, newID string }
-	lastRB     struct{ id, layer string }
-	lastResize nodeapi.ResizeRequest
+	buildErr    error
+	createErr   error
+	healthErr   error
+	healthCalls atomic.Int64
+	snapSeq     int
+	lastFork    struct{ parent, layer, newID string }
+	lastRB      struct{ id, layer string }
+	lastResize  nodeapi.ResizeRequest
 }
 
 func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
@@ -76,13 +82,23 @@ func (m *cpMockAgent) Exec(_ context.Context, id string, req *guestapi.ExecReque
 	return &guestapi.ExecResponse{ExitCode: 0, Stdout: []byte("out:" + req.Cmd)}, nil
 }
 func (m *cpMockAgent) Health(_ context.Context, id string) (*guestapi.HealthResponse, error) {
-	return &guestapi.HealthResponse{OK: true, Seq: 1}, nil
+	m.healthCalls.Add(1)
+	if m.healthErr != nil {
+		return nil, m.healthErr
+	}
+	return &guestapi.HealthResponse{OK: true, Seq: 1, MemTotalKiB: 1 << 20, MemAvailableKiB: 1 << 19, PSIMemSome10: 0.5}, nil
 }
 func (m *cpMockAgent) ReadFile(_ context.Context, id, path string) ([]byte, error) {
 	return []byte("data:" + path), nil
 }
 func (m *cpMockAgent) WriteFile(context.Context, string, string, fs.FileMode, []byte) error {
 	return nil
+}
+func (m *cpMockAgent) ListDir(_ context.Context, id, path string) (*guestapi.ListDirResponse, error) {
+	return &guestapi.ListDirResponse{Path: path, Entries: []guestapi.DirEntry{
+		{Name: "etc", IsDir: true, Mode: "drwxr-xr-x"},
+		{Name: "data.txt", Size: 4, Mode: "-rw-r--r--"},
+	}}, nil
 }
 
 func newTestServer(t *testing.T, agent nodeapi.Agent) http.Handler {
@@ -456,6 +472,182 @@ func TestServerGuestProxyUnsupportedAgent(t *testing.T) {
 
 	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/x", nil); w.Code != http.StatusNotImplemented {
 		t.Errorf("proxy without dialer = %d, want 501: %s", w.Code, w.Body)
+	}
+}
+
+// TestSandboxHealthEndpoint pins /health semantics: RUNNING probes the
+// guest (with a short-TTL cache), non-RUNNING answers ok:false WITHOUT
+// touching the node, probe failure on a RUNNING row is 502, ownership 404s.
+func TestSandboxHealthEndpoint(t *testing.T) {
+	agent := &cpMockAgent{}
+	h := newTestServer(t, agent)
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	var hv struct {
+		State       string `json:"state"`
+		OK          bool   `json:"ok"`
+		MemTotalKiB uint64 `json:"mem_total_kib"`
+	}
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/health", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("health = %d: %s", w.Code, w.Body)
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &hv)
+	if hv.State != "RUNNING" || !hv.OK || hv.MemTotalKiB != 1<<20 {
+		t.Errorf("health body = %+v: %s", hv, w.Body)
+	}
+	if n := agent.healthCalls.Load(); n != 1 {
+		t.Errorf("probes = %d, want 1", n)
+	}
+
+	// Within the TTL the cache answers; the guest is not re-probed.
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/health", nil); w.Code != http.StatusOK {
+		t.Errorf("cached health = %d", w.Code)
+	}
+	if n := agent.healthCalls.Load(); n != 1 {
+		t.Errorf("probes after cached read = %d, want 1", n)
+	}
+
+	// Paused: 200 ok:false, node untouched.
+	call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/pause", nil)
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/health", nil)
+	_ = json.Unmarshal(w.Body.Bytes(), &hv)
+	if w.Code != http.StatusOK || hv.OK || hv.State != "PAUSED_HOT" {
+		t.Errorf("paused health = %d %+v", w.Code, hv)
+	}
+	if n := agent.healthCalls.Load(); n != 1 {
+		t.Errorf("paused sandbox probed the guest (%d probes)", n)
+	}
+
+	// Ownership: other tenants get 404, not 401/403 (no probing).
+	if w := callAs(h, "tok2", http.MethodGet, "/v0/sandboxes/"+sb.ID+"/health", nil); w.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant health = %d, want 404", w.Code)
+	}
+
+	// A RUNNING row whose guest cannot be reached is genuinely abnormal: 502.
+	agent.healthErr = fmt.Errorf("guest unreachable")
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb2 Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb2)
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb2.ID+"/health", nil); w.Code != http.StatusBadGateway {
+		t.Errorf("unreachable guest = %d, want 502: %s", w.Code, w.Body)
+	}
+}
+
+// TestSandboxTermEndpoint drives the terminal path end to end below the
+// PTY: browser-style subprotocol auth → gin → ReverseProxy upgrade → stub
+// guest /term. Also pins the state gate (409), the upgrade requirement
+// (400), ownership (404), and that the credential never reaches the guest.
+func TestSandboxTermEndpoint(t *testing.T) {
+	var guestSaw struct {
+		path, query, protocols string
+	}
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		guestSaw.path, guestSaw.query = r.URL.Path, r.URL.RawQuery
+		guestSaw.protocols = r.Header.Get("Sec-WebSocket-Protocol")
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{guestapi.TermSubprotocol}})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		_ = conn.Write(ctx, typ, data)
+		conn.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer guest.Close()
+
+	h := newTestServer(t, &cpDialerAgent{addr: strings.TrimPrefix(guest.URL, "http://")})
+	front := httptest.NewServer(h)
+	defer front.Close()
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx,
+		"ws"+strings.TrimPrefix(front.URL, "http")+"/v0/sandboxes/"+sb.ID+"/term?cols=120&rows=40",
+		&websocket.DialOptions{Subprotocols: []string{
+			"bearer." + base64.RawURLEncoding.EncodeToString([]byte("tok")),
+			guestapi.TermSubprotocol,
+		}})
+	if err != nil {
+		t.Fatalf("ws dial /term: %v", err)
+	}
+	defer conn.CloseNow()
+	if got := conn.Subprotocol(); got != guestapi.TermSubprotocol {
+		t.Errorf("negotiated subprotocol = %q", got)
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte("ls\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	typ, data, err := conn.Read(ctx)
+	if err != nil || typ != websocket.MessageBinary || string(data) != "ls\n" {
+		t.Errorf("echo = %v %q (%v)", typ, data, err)
+	}
+	if guestSaw.path != "/term" || guestSaw.query != "cols=120&rows=40" {
+		t.Errorf("guest saw %s?%s, want /term?cols=120&rows=40", guestSaw.path, guestSaw.query)
+	}
+	if strings.Contains(guestSaw.protocols, "bearer.") {
+		t.Errorf("credential leaked to the guest: %q", guestSaw.protocols)
+	}
+
+	// Non-upgrade GET on a RUNNING sandbox: 400.
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/term", nil); w.Code != http.StatusBadRequest {
+		t.Errorf("plain GET /term = %d, want 400: %s", w.Code, w.Body)
+	}
+	// Ownership: 404 before any state leak.
+	if w := callAs(h, "tok2", http.MethodGet, "/v0/sandboxes/"+sb.ID+"/term", nil); w.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant /term = %d, want 404", w.Code)
+	}
+	// State gate: a paused sandbox refuses loudly.
+	call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/pause", nil)
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/term", nil); w.Code != http.StatusConflict {
+		t.Errorf("paused /term = %d, want 409: %s", w.Code, w.Body)
+	}
+}
+
+// TestServerListDir pins the ?op=list branch of GET /files.
+func TestServerListDir(t *testing.T) {
+	h := newTestServer(t, &cpMockAgent{})
+
+	w := call(h, http.MethodPost, "/v0/templates", map[string]string{"name": "web", "image": "img"})
+	var tpl Template
+	_ = json.Unmarshal(w.Body.Bytes(), &tpl)
+	w = call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID})
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	w = call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/files?op=list&path=/opt", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d: %s", w.Code, w.Body)
+	}
+	var listing guestapi.ListDirResponse
+	_ = json.Unmarshal(w.Body.Bytes(), &listing)
+	if listing.Path != "/opt" || len(listing.Entries) != 2 || !listing.Entries[0].IsDir {
+		t.Errorf("listing = %+v", listing)
+	}
+
+	// The op parameter must not change plain reads.
+	if w := call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/files?path=/etc/hosts", nil); w.Code != http.StatusOK || w.Body.String() != "data:/etc/hosts" {
+		t.Errorf("plain read = %d %q", w.Code, w.Body)
+	}
+	if w := callAs(h, "tok2", http.MethodGet, "/v0/sandboxes/"+sb.ID+"/files?op=list&path=/", nil); w.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant list = %d, want 404", w.Code)
 	}
 }
 

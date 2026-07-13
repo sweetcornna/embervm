@@ -92,6 +92,12 @@ func (m *mockAgent) WriteFile(_ context.Context, id, path string, mode fs.FileMo
 	m.lastWrite.path, m.lastWrite.mode, m.lastWrite.data = path, mode, data
 	return nil
 }
+func (m *mockAgent) ListDir(_ context.Context, id, path string) (*guestapi.ListDirResponse, error) {
+	return &guestapi.ListDirResponse{Path: path, Entries: []guestapi.DirEntry{
+		{Name: "bin", IsDir: true, Mode: "drwxr-xr-x"},
+		{Name: "hello.txt", Size: 5, Mode: "-rw-r--r--"},
+	}}, nil
+}
 
 func serveMock(t *testing.T, m Agent) *Client {
 	t.Helper()
@@ -179,6 +185,14 @@ func TestNodeAPIRoundtrip(t *testing.T) {
 	}
 	if m.lastWrite.path != "/tmp/x" || m.lastWrite.mode != 0o600 || string(m.lastWrite.data) != "payload" {
 		t.Errorf("server saw write %+v", m.lastWrite)
+	}
+
+	listing, err := c.ListDir(ctx, "sbx1", "/opt")
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	if listing.Path != "/opt" || len(listing.Entries) != 2 || !listing.Entries[0].IsDir {
+		t.Errorf("listing = %+v", listing)
 	}
 
 	if err := c.SetBalloon(ctx, "sbx1", 128); err != nil {

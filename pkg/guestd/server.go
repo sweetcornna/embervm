@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -37,10 +38,11 @@ type Options struct {
 }
 
 type server struct {
-	version   string
-	maxOutput int64
-	seq       atomic.Uint64
-	resumes   atomic.Uint64
+	version      string
+	maxOutput    int64
+	seq          atomic.Uint64
+	resumes      atomic.Uint64
+	termSessions atomic.Int64
 }
 
 // NewServer returns the guestd HTTP handler.
@@ -55,6 +57,7 @@ func NewServer(opts Options) http.Handler {
 	mux.HandleFunc("POST /exec", s.handleExec)
 	mux.HandleFunc("GET /files", s.handleReadFile)
 	mux.HandleFunc("PUT /files", s.handleWriteFile)
+	mux.HandleFunc("GET /term", s.handleTerm)
 	return mux
 }
 
@@ -174,6 +177,10 @@ func (s *server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if r.URL.Query().Get("op") == "list" {
+		s.handleListDir(w, path)
+		return
+	}
 	fi, err := os.Stat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -241,4 +248,64 @@ func (s *server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxDirEntries caps one listing: a pathological directory must not balloon
+// the response inside the guest, where memory is the scarcest resource (same
+// rationale as maxExecBody).
+const maxDirEntries = 10000
+
+func (s *server) handleListDir(w http.ResponseWriter, path string) {
+	fi, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		writeError(w, http.StatusNotFound, err)
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	case !fi.IsDir():
+		writeError(w, http.StatusBadRequest, errors.New("path is not a directory"))
+		return
+	}
+	ents, err := os.ReadDir(path)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	resp := guestapi.ListDirResponse{Path: path, Entries: make([]guestapi.DirEntry, 0, min(len(ents), maxDirEntries))}
+	for _, e := range ents {
+		if len(resp.Entries) >= maxDirEntries {
+			resp.Truncated = true
+			break
+		}
+		full := filepath.Join(path, e.Name())
+		info, err := os.Lstat(full)
+		if err != nil {
+			continue // raced away between ReadDir and Lstat
+		}
+		de := guestapi.DirEntry{
+			Name:    e.Name(),
+			Size:    info.Size(),
+			Mode:    info.Mode().String(),
+			ModTime: info.ModTime().UTC(),
+			IsDir:   info.IsDir(),
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			if target, err := os.Readlink(full); err == nil {
+				de.Symlink = target
+			}
+			// IsDir follows the link so a browser can descend through
+			// directory symlinks; a dangling link stays a leaf.
+			if ti, err := os.Stat(full); err == nil {
+				de.IsDir = ti.IsDir()
+			}
+		}
+		resp.Entries = append(resp.Entries, de)
+	}
+	// ReadDir already sorts by name; hoist directories for browser display.
+	sort.SliceStable(resp.Entries, func(i, j int) bool {
+		return resp.Entries[i].IsDir && !resp.Entries[j].IsDir
+	})
+	writeJSON(w, http.StatusOK, resp)
 }

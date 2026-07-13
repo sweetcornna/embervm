@@ -4,6 +4,8 @@
 // one package so they cannot drift.
 package guestapi
 
+import "time"
+
 // Port is the TCP port guestd listens on inside every template-built guest.
 // The guest address is always 172.16.0.2 (per-sandbox netns, see docs/zh/02 §4).
 const Port = 7777
@@ -65,4 +67,51 @@ type ExecResponse struct {
 // ErrorResponse is the body of every non-2xx guestd reply.
 type ErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// DirEntry describes one entry of a listed guest directory (console file
+// browser). Mode is fs.FileMode.String() (e.g. "drwxr-xr-x"); Symlink is the
+// readlink target when the entry is a symlink (IsDir then reflects the
+// target, so a browser can descend through directory links).
+type DirEntry struct {
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	Mode    string    `json:"mode"`
+	ModTime time.Time `json:"mtime"`
+	IsDir   bool      `json:"is_dir"`
+	Symlink string    `json:"symlink,omitempty"`
+}
+
+// ListDirResponse answers GET /files?op=list. Entries are sorted
+// directories-first, then by name; Truncated is set when the directory
+// exceeded the guest-side entry cap.
+type ListDirResponse struct {
+	Path      string     `json:"path"`
+	Entries   []DirEntry `json:"entries"`
+	Truncated bool       `json:"truncated,omitempty"`
+}
+
+// Interactive terminal (GET /term, WebSocket).
+//
+// The socket speaks subprotocol TermSubprotocol: binary frames carry raw PTY
+// bytes in both directions; text frames carry JSON TermControl messages.
+// Initial geometry rides the query string (?cols=&rows=, defaults 80×24) so
+// the first paint is right before the first resize message.
+const TermSubprotocol = "embervm-term.v1"
+
+// Close codes on a /term socket beyond the standard ones (1000 = shell
+// exited, 1011 = internal error).
+const (
+	TermCloseSessionLimit = 4000 // too many concurrent sessions
+	TermCloseIdle         = 4001 // no client frames for the idle window
+)
+
+// TermControl is a text-frame control message on a /term socket.
+// client→guestd: {"type":"resize","cols":N,"rows":N}.
+// guestd→client: {"type":"exit","code":N}, sent just before close 1000.
+type TermControl struct {
+	Type string `json:"type"`
+	Cols int    `json:"cols,omitempty"`
+	Rows int    `json:"rows,omitempty"`
+	Code int    `json:"code,omitempty"`
 }

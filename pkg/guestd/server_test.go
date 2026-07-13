@@ -321,6 +321,90 @@ func TestFilesErrors(t *testing.T) {
 	}
 }
 
+func TestListDir(t *testing.T) {
+	srv := newTestServer(t, Options{})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/files?op=list&path=" + dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list = %d", resp.StatusCode)
+	}
+	var out guestapi.ListDirResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Entries) != 3 {
+		t.Fatalf("entries = %d, want 3: %+v", len(out.Entries), out.Entries)
+	}
+	// Directories first ("link" resolves to a directory), then files by name.
+	byName := map[string]guestapi.DirEntry{}
+	for _, e := range out.Entries {
+		byName[e.Name] = e
+	}
+	if !out.Entries[0].IsDir || !out.Entries[1].IsDir {
+		t.Errorf("directories not hoisted: %+v", out.Entries)
+	}
+	if e := byName["hello.txt"]; e.IsDir || e.Size != 2 || !strings.HasPrefix(e.Mode, "-") {
+		t.Errorf("hello.txt = %+v", e)
+	}
+	if e := byName["sub"]; !e.IsDir {
+		t.Errorf("sub = %+v", e)
+	}
+	if e := byName["link"]; !e.IsDir || e.Symlink != "sub" {
+		t.Errorf("link = %+v (want dir via symlink target)", e)
+	}
+}
+
+func TestListDirErrors(t *testing.T) {
+	srv := newTestServer(t, Options{})
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{dir + "/missing", http.StatusNotFound},
+		{file, http.StatusBadRequest}, // not a directory
+	} {
+		resp, err := http.Get(srv.URL + "/files?op=list&path=" + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Errorf("list %s = %d, want %d", tc.path, resp.StatusCode, tc.want)
+		}
+	}
+
+	// op absent still reads the file (list must not change /files semantics).
+	resp, err := http.Get(srv.URL + "/files?path=" + file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(raw) != "x" {
+		t.Errorf("plain read = %d %q", resp.StatusCode, raw)
+	}
+}
+
 func TestFilesPutModeInvalid(t *testing.T) {
 	srv := newTestServer(t, Options{})
 	path := filepath.Join(t.TempDir(), "f")

@@ -17,6 +17,7 @@ design reference that EmberVM uses, per the code-reuse compliance policy in
 | 5 | Contributor Covenant v2.1 | [contributor-covenant.org](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html) | CC BY 4.0 | Adapted as [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), with attribution | Yes (in this repository) |
 | 6 | google/go-containerregistry | [google/go-containerregistry](https://github.com/google/go-containerregistry) | Apache-2.0 | Go module dependency; daemonless pull + flatten of Docker/OCI images in `pkg/template` (the template builder); statically linked into EmberVM binaries | Yes (in compiled binaries) |
 | 7 | cyphar/filepath-securejoin | [cyphar/filepath-securejoin](https://github.com/cyphar/filepath-securejoin) | BSD-3-Clause | Go module dependency; scoped symlink resolution that keeps tar extraction (`pkg/template`) inside the destination root (tar-slip defense); statically linked into EmberVM binaries | Yes (in compiled binaries) |
+| 8 | coder/websocket | [coder/websocket](https://github.com/coder/websocket) | ISC | Go module dependency; WebSocket server for guestd's interactive terminal (`pkg/guestd/term.go`) and WS clients in tests; zero transitive deps; statically linked into EmberVM binaries (notably the guestd injected into template rootfs) | Yes (in compiled binaries) |
 
 ## Entry details
 
@@ -79,6 +80,16 @@ design reference that EmberVM uses, per the code-reuse compliance policy in
   layer cannot place a `foo -> /etc` symlink and then write through it to the
   host. The library is the same audited implementation used by runc and
   containerd. BSD-3-Clause is compatible with AGPL-3.0.
+
+### 8. coder/websocket (ISC)
+
+- guestd terminates the console's interactive-terminal WebSocket inside the
+  guest (`pkg/guestd/term.go`): binary frames carry raw PTY bytes, text
+  frames carry JSON control messages, and the server ping/pong is what reaps
+  orphaned shells after a snapshot restore. The library is the maintained
+  fork of nhooyr.io/websocket, has zero transitive dependencies (~100–200 KB
+  on the rootfs-injected guestd binary), and is also used as the WS client in
+  control-plane and node tests. ISC is compatible with AGPL-3.0.
 
 ## How to add an entry
 

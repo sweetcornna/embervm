@@ -13,7 +13,8 @@ export default defineConfig({
   server: {
     proxy: {
       // `npm run dev` against a locally running apiserver / embervm dev.
-      "/v0": "http://127.0.0.1:8080",
+      // ws:true carries the /term WebSocket through the same proxy.
+      "/v0": { target: "http://127.0.0.1:8080", ws: true },
     },
   },
 });
