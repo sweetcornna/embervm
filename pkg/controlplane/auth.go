@@ -87,28 +87,41 @@ func ResolveTokens(tokensFile string, allowInsecureDevToken bool) (store *TokenS
 
 const ctxTokenKey = "embervm.token"
 
+// AuthFallback is an alternate credential source consulted only when no
+// bearer token was presented at all (header or WS subprotocol) — e.g. the
+// guest proxy's iframe session cookie. A presented-but-invalid token still
+// 401s without consulting fallbacks.
+type AuthFallback func(c *gin.Context) (TokenInfo, bool)
+
 // Auth is Gin middleware that requires a valid `Authorization: Bearer <token>`
 // and stashes the TokenInfo in the request context. Unknown or missing tokens
 // get 401. WebSocket upgrades may instead smuggle the token in a
 // Sec-WebSocket-Protocol entry (see wsProtocolToken) — the browser WebSocket
 // API cannot set Authorization.
-func (ts *TokenStore) Auth() gin.HandlerFunc {
+func (ts *TokenStore) Auth(fallbacks ...AuthFallback) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := bearerToken(c.GetHeader("Authorization"))
 		if !ok {
 			token, ok = wsProtocolToken(c.Request)
 		}
-		if !ok {
-			c.AbortWithStatusJSON(401, gin.H{"error": "missing bearer token"})
+		if ok {
+			info, valid := ts.Lookup(token)
+			if !valid {
+				c.AbortWithStatusJSON(401, gin.H{"error": "invalid token"})
+				return
+			}
+			c.Set(ctxTokenKey, info)
+			c.Next()
 			return
 		}
-		info, ok := ts.Lookup(token)
-		if !ok {
-			c.AbortWithStatusJSON(401, gin.H{"error": "invalid token"})
-			return
+		for _, f := range fallbacks {
+			if info, ok := f(c); ok {
+				c.Set(ctxTokenKey, info)
+				c.Next()
+				return
+			}
 		}
-		c.Set(ctxTokenKey, info)
-		c.Next()
+		c.AbortWithStatusJSON(401, gin.H{"error": "missing bearer token"})
 	}
 }
 

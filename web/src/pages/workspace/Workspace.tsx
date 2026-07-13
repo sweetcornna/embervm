@@ -34,6 +34,8 @@ import { disposeTermSandbox, noteTermState } from "../../lib/termBridge";
 import { toast, toastError } from "../../lib/toast";
 import { CheckpointsTab } from "./CheckpointsTab";
 import { OverviewTab } from "./OverviewTab";
+import { PreviewTab } from "./PreviewTab";
+import { SettingsTab } from "./SettingsTab";
 
 // xterm.js and CodeMirror stay out of the entry chunk; these tabs load on
 // first use.
@@ -46,7 +48,9 @@ const TABS = [
   { value: "overview", label: "Overview" },
   { value: "terminal", label: "Terminal" },
   { value: "files", label: "Files" },
+  { value: "preview", label: "Preview" },
   { value: "checkpoints", label: "Checkpoints" },
+  { value: "settings", label: "Settings" },
 ] as const;
 
 type TabValue = (typeof TABS)[number]["value"];
@@ -109,9 +113,15 @@ export function Workspace() {
             {tab === "files" && <FilesTab sb={sb} />}
           </Suspense>
         )}
+        {tab === "preview" && <PreviewTab sb={sb} />}
         {tab === "checkpoints" && (
           <div className="h-full overflow-y-auto">
             <CheckpointsTab sb={sb} />
+          </div>
+        )}
+        {tab === "settings" && (
+          <div className="h-full overflow-y-auto">
+            <SettingsTab sb={sb} />
           </div>
         )}
       </div>

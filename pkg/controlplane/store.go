@@ -7,6 +7,7 @@ package controlplane
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -422,8 +423,9 @@ func (s *Store) SetSandboxState(ctx context.Context, id, from, to, netns, errMsg
 		return ErrNotFound
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO sandbox_events (sandbox_id, from_state, to_state) VALUES ($1,$2,$3)`,
-		id, from, to); err != nil {
+		`INSERT INTO sandbox_events (sandbox_id, from_state, to_state, detail)
+		 VALUES ($1,$2,$3, CASE WHEN $4='' THEN NULL ELSE jsonb_build_object('error',$4::text) END)`,
+		id, from, to, errMsg); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -455,8 +457,9 @@ func (s *Store) TransitionSandbox(ctx context.Context, id, from, to, errMsg stri
 		return ErrConflict
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO sandbox_events (sandbox_id, from_state, to_state) VALUES ($1,$2,$3)`,
-		id, from, to); err != nil {
+		`INSERT INTO sandbox_events (sandbox_id, from_state, to_state, detail)
+		 VALUES ($1,$2,$3, CASE WHEN $4='' THEN NULL ELSE jsonb_build_object('error',$4::text) END)`,
+		id, from, to, errMsg); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -519,6 +522,60 @@ func (s *Store) WakeIntervals(ctx context.Context, id string) ([]time.Duration, 
 				pausedAt = nil
 			}
 		}
+	}
+	return out, rows.Err()
+}
+
+// SandboxEvent is one lifecycle transition as recorded in sandbox_events.
+// Detail is the raw jsonb (currently `{"error": "..."}` on failed
+// transitions); the console timeline renders it verbatim.
+type SandboxEvent struct {
+	ID        int64           `json:"id"`
+	SandboxID string          `json:"sandbox_id"`
+	FromState string          `json:"from_state,omitempty"`
+	ToState   string          `json:"to_state"`
+	At        time.Time       `json:"at"`
+	Detail    json.RawMessage `json:"detail,omitempty"`
+}
+
+// ListSandboxEvents returns one sandbox's transitions newest-first.
+// beforeID is an exclusive cursor (0 = from the top); the bigserial id is a
+// gapless-order, unique sort key, so no timestamp tie-breaking is needed.
+func (s *Store) ListSandboxEvents(ctx context.Context, sandboxID string, beforeID int64, limit int) ([]SandboxEvent, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, sandbox_id, COALESCE(from_state,''), to_state, at, detail
+		   FROM sandbox_events
+		  WHERE sandbox_id=$1 AND ($2=0 OR id<$2)
+		  ORDER BY id DESC LIMIT $3`, sandboxID, beforeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanEvents(rows)
+}
+
+// ListOwnerEvents returns the newest transitions across every sandbox the
+// owner has — the fleet activity feed.
+func (s *Store) ListOwnerEvents(ctx context.Context, owner string, beforeID int64, limit int) ([]SandboxEvent, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT e.id, e.sandbox_id, COALESCE(e.from_state,''), e.to_state, e.at, e.detail
+		   FROM sandbox_events e JOIN sandboxes s ON s.id = e.sandbox_id
+		  WHERE s.owner=$1 AND ($2=0 OR e.id<$2)
+		  ORDER BY e.id DESC LIMIT $3`, owner, beforeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanEvents(rows)
+}
+
+func scanEvents(rows pgx.Rows) ([]SandboxEvent, error) {
+	defer rows.Close()
+	var out []SandboxEvent
+	for rows.Next() {
+		var e SandboxEvent
+		if err := rows.Scan(&e.ID, &e.SandboxID, &e.FromState, &e.ToState, &e.At, &e.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

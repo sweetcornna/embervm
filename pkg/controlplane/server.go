@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -52,7 +54,23 @@ type Server struct {
 	// probe rate bounded (each probe also bumps guestd's seq counter).
 	hcMu    sync.Mutex
 	hcCache map[string]cachedHealth
+
+	// Proxy sessions: iframes and new-tab navigations into the guest proxy
+	// cannot attach Authorization headers, so the console mints an HttpOnly
+	// cookie session (POST /v0/proxy-session) honored ONLY on proxy routes.
+	psMu          sync.Mutex
+	proxySessions map[string]proxySession
 }
+
+type proxySession struct {
+	info    TokenInfo
+	expires time.Time
+}
+
+const (
+	proxySessionCookie = "embervm_proxy"
+	proxySessionTTL    = 8 * time.Hour
+)
 
 // cachedHealth is one sandbox's last successful guest-health probe.
 type cachedHealth struct {
@@ -87,7 +105,8 @@ func NewServer(store *Store, agent nodeapi.Agent, tokens *TokenStore, l1, cold c
 // runs sched.RegisterNodes + sched.Run.
 func NewClusterServer(store *Store, registry *Registry, sched *Scheduler, tokens *TokenStore, l1, cold chunkstore.ListingBackend) *Server {
 	return &Server{store: store, registry: registry, sched: sched, tokens: tokens, l1: l1, cold: cold,
-		guestTransports: map[string]*http.Transport{}, hcCache: map[string]cachedHealth{}}
+		guestTransports: map[string]*http.Transport{}, hcCache: map[string]cachedHealth{},
+		proxySessions: map[string]proxySession{}}
 }
 
 // guestTransportFor returns the shared proxy transport for one node's
@@ -169,7 +188,10 @@ func (s *Server) Handler() http.Handler {
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 	r.GET("/metrics", gin.WrapH(metrics.Handler()))
 
-	v0 := r.Group("/v0", s.tokens.Auth(), limitBodies())
+	v0 := r.Group("/v0", s.tokens.Auth(s.proxyCookieAuth), limitBodies())
+	v0.POST("/proxy-session", s.createProxySession)
+	v0.DELETE("/proxy-session", s.deleteProxySession)
+	v0.GET("/events", s.listEvents)
 	v0.POST("/templates", s.createTemplate)
 	v0.GET("/templates", s.listTemplates)
 	v0.GET("/templates/:id", s.getTemplate)
@@ -203,6 +225,7 @@ func (s *Server) Handler() http.Handler {
 	v0.PUT("/sandboxes/:id/files", s.writeFile)
 	v0.GET("/sandboxes/:id/health", s.sandboxHealth)
 	v0.GET("/sandboxes/:id/term", s.termSandbox)
+	v0.GET("/sandboxes/:id/events", s.sandboxEvents)
 
 	// Everything that is not an API route is the embedded console SPA.
 	// /v0 misses stay JSON errors — a client-routed HTML page answering an
@@ -1587,6 +1610,132 @@ func (s *Server) storeGuestHealth(id string, h *guestapi.HealthResponse) {
 		clear(s.hcCache)
 	}
 	s.hcCache[id] = cachedHealth{at: time.Now(), h: h}
+}
+
+// createProxySession mints an HttpOnly cookie session for the guest proxy:
+// the browser cannot attach Authorization to <iframe> or new-tab requests,
+// so the console trades its bearer token for a short-lived cookie that
+// proxyCookieAuth honors on /proxy/ routes only. SameSite=Strict keeps
+// third-party pages from riding it.
+func (s *Server) createProxySession(c *gin.Context) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	id := hex.EncodeToString(raw)
+	now := time.Now()
+	s.psMu.Lock()
+	for k, v := range s.proxySessions { // opportunistic expiry sweep
+		if now.After(v.expires) {
+			delete(s.proxySessions, k)
+		}
+	}
+	s.proxySessions[id] = proxySession{info: tokenInfo(c), expires: now.Add(proxySessionTTL)}
+	s.psMu.Unlock()
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(proxySessionCookie, id, int(proxySessionTTL.Seconds()),
+		"/v0/sandboxes", "", c.Request.TLS != nil, true)
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) deleteProxySession(c *gin.Context) {
+	if id, err := c.Cookie(proxySessionCookie); err == nil {
+		s.psMu.Lock()
+		delete(s.proxySessions, id)
+		s.psMu.Unlock()
+	}
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(proxySessionCookie, "", -1, "/v0/sandboxes", "", c.Request.TLS != nil, true)
+	c.Status(http.StatusNoContent)
+}
+
+// proxyCookieAuth is the Auth fallback for guest-proxy routes (and nothing
+// else): ownership is still enforced per-sandbox by ownedSandbox downstream.
+func (s *Server) proxyCookieAuth(c *gin.Context) (TokenInfo, bool) {
+	if !strings.Contains(c.FullPath(), "/proxy/") {
+		return TokenInfo{}, false
+	}
+	id, err := c.Cookie(proxySessionCookie)
+	if err != nil {
+		return TokenInfo{}, false
+	}
+	s.psMu.Lock()
+	defer s.psMu.Unlock()
+	ps, ok := s.proxySessions[id]
+	if !ok {
+		return TokenInfo{}, false
+	}
+	if time.Now().After(ps.expires) {
+		delete(s.proxySessions, id)
+		return TokenInfo{}, false
+	}
+	return ps.info, true
+}
+
+// eventsPage parses the shared ?before= / ?limit= cursor params.
+func eventsPage(c *gin.Context) (before int64, limit int, err error) {
+	limit = 100
+	if raw := c.Query("limit"); raw != "" {
+		n, perr := strconv.Atoi(raw)
+		if perr != nil || n <= 0 {
+			return 0, 0, errors.New("limit must be a positive integer")
+		}
+		limit = min(n, 500)
+	}
+	if raw := c.Query("before"); raw != "" {
+		n, perr := strconv.ParseInt(raw, 10, 64)
+		if perr != nil || n <= 0 {
+			return 0, 0, errors.New("before must be a positive event id")
+		}
+		before = n
+	}
+	return before, limit, nil
+}
+
+func eventsBody(events []SandboxEvent, limit int) gin.H {
+	if events == nil {
+		events = []SandboxEvent{}
+	}
+	body := gin.H{"events": events}
+	if len(events) == limit {
+		body["next_before"] = events[len(events)-1].ID
+	}
+	return body
+}
+
+// sandboxEvents is one sandbox's lifecycle timeline, newest first.
+func (s *Server) sandboxEvents(c *gin.Context) {
+	sb, ok := s.ownedSandbox(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	before, limit, err := eventsPage(c)
+	if err != nil {
+		abortErr(c, http.StatusBadRequest, err)
+		return
+	}
+	events, err := s.store.ListSandboxEvents(c, sb.ID, before, limit)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, eventsBody(events, limit))
+}
+
+// listEvents is the owner-wide activity feed.
+func (s *Server) listEvents(c *gin.Context) {
+	before, limit, err := eventsPage(c)
+	if err != nil {
+		abortErr(c, http.StatusBadRequest, err)
+		return
+	}
+	events, err := s.store.ListOwnerEvents(c, tokenInfo(c).Owner, before, limit)
+	if err != nil {
+		abortErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, eventsBody(events, limit))
 }
 
 // termSandbox is the interactive terminal: an authenticated, owner-scoped
