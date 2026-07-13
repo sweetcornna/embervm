@@ -8,6 +8,23 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- **uffd zero-fill truncation** — `zeroRange` treated the kernel stopping a
+  multi-page `UFFDIO_ZEROPAGE` at an already-mapped page as "span done"; at
+  the M6 coalesced zero-run sizes that left unfilled tails marked populated,
+  and the next fault on such a page was consumed but never woken — hanging
+  whatever touched it (CI e2e-m3: a post-cold-restore snapshot writer, 29
+  minutes). zeroRange now skips mapped pages (authoritative by
+  construction: zeros or newer guest writes) and resumes behind them;
+  regression test drives a real userfaultfd.
+- **Stale node rows win placement** — `RegisterNodes` now revives its
+  members and retires rows absent from the static registry. Previously a
+  DB that had run a different topology (a single-node `local` before a
+  `--nodes` cluster) kept the old row `up` forever with unlimited
+  capacity, so `Place` routed creates/builds to a node the registry could
+  not resolve (503 "unknown node").
+
 ### Added
 
 - **Web console** — a management UI embedded in the apiserver binary

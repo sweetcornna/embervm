@@ -108,16 +108,25 @@ func NewScheduler(store *Store, registry *Registry, cfg SchedulerConfig) *Schedu
 	return &Scheduler{store: store, registry: registry, cfg: cfg.withDefaults(), misses: map[string]int{}}
 }
 
-// RegisterNodes upserts the static membership into the nodes table.
+// RegisterNodes writes the static membership into the nodes table: members
+// are upserted and revived (an upsert keeps an existing row's state, so a
+// previously-retired node must be touched back up), and rows absent from
+// the registry are retired — the config is the truth, and a stale row from
+// an earlier topology (single-node 'local' vs a cluster, a removed worker)
+// must not win placement.
 func (s *Scheduler) RegisterNodes(ctx context.Context, addrs map[string]string, capacities map[string]int) error {
-	for _, id := range s.registry.IDs() {
+	ids := s.registry.IDs()
+	for _, id := range ids {
 		if err := s.store.UpsertNode(ctx, Node{
 			ID: id, Addr: addrs[id], CapacityMiB: capacities[id],
 		}); err != nil {
 			return err
 		}
+		if err := s.store.TouchNode(ctx, id); err != nil {
+			return err
+		}
 	}
-	return nil
+	return s.store.RetireAbsentNodes(ctx, ids)
 }
 
 // Run polls until ctx is canceled.

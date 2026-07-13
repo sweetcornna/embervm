@@ -51,6 +51,44 @@ func newCluster(t *testing.T, capacities map[string]int) (*Store, *Scheduler, ma
 	return s, sched, agents
 }
 
+// TestSchedulerRegisterRetiresAbsent: node rows from an earlier topology
+// (a single-node 'local' against a DB later run as a cluster, a removed
+// worker) must not survive as placeable — a stale unlimited-capacity row
+// would win every Place and route verbs to a node the registry cannot
+// resolve (the e2e-m6 CI lesson). Re-registration also revives rows a
+// previous shape retired.
+func TestSchedulerRegisterRetiresAbsent(t *testing.T) {
+	s, sched, _ := newCluster(t, map[string]int{"n1": 1024})
+	ctx := context.Background()
+
+	// A stale row from a previous single-node deployment: capacity 0 =
+	// unlimited, so it would beat every real node at bin-pack.
+	if err := s.UpsertNode(ctx, Node{ID: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sched.RegisterNodes(ctx,
+		map[string]string{"n1": ""}, map[string]int{"n1": 1024}); err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{}
+	nodes, err := s.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		states[n.ID] = n.State
+	}
+	if states["local"] != "down" {
+		t.Fatalf("stale node state = %q, want down", states["local"])
+	}
+	if states["n1"] != "up" {
+		t.Fatalf("member state = %q, want up (re-registration revives)", states["n1"])
+	}
+	if node, err := sched.Place(ctx, "", 256, 1); err != nil || node != "n1" {
+		t.Fatalf("Place = %q, %v; want n1 (retired row must not win)", node, err)
+	}
+}
+
 // TestSchedulerCanFit exercises the M6 resize growth admission: deltas
 // against the oversold budget, shrink always fits, down nodes reject.
 func TestSchedulerCanFit(t *testing.T) {

@@ -230,3 +230,53 @@ func TestPopulateChunkRegionStraddle(t *testing.T) {
 		t.Fatal("region B content differs from source image")
 	}
 }
+
+// TestZeroRangeResumesPastMappedPages: pages mapped concurrently (what
+// racing demand faults and removed-page serves do) must not truncate a
+// coalesced zero fill. The kernel stops a multi-page UFFDIO_ZEROPAGE at the
+// first mapped page — at the head with EEXIST, mid-span with EAGAIN plus
+// progress — and zeroRange must resume behind it. The old EEXIST-means-done
+// reading left the tail unmapped while the caller marked its chunks
+// populated: the next fault on such a page was consumed and never woken,
+// hanging the toucher forever (the e2e-m3 snapshot writer, 29 minutes).
+func TestZeroRangeResumesPastMappedPages(t *testing.T) {
+	const pages = 64
+	const pageSize = 4096
+	size := uint64(pages * pageSize)
+
+	mem, err := unix.Mmap(-1, 0, int(size), unix.PROT_READ|unix.PROT_WRITE,
+		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Munmap(mem) })
+	base := uint64(uintptr(unsafe.Pointer(&mem[0])))
+	fd := newTestUffd(t, base, size)
+
+	h := &Handler{
+		uffd: fd,
+		mappings: []GuestRegionUffdMapping{
+			{BaseHostVirtAddr: base, Size: size, Offset: 0, PageSize: pageSize},
+		},
+		quit: make(chan struct{}),
+	}
+
+	// Pre-map the head page and two interior pages.
+	for _, pi := range []uint64{0, 17, 40} {
+		if err := h.zeroPage(base+pi*pageSize, pageSize); err != nil {
+			t.Fatalf("pre-map page %d: %v", pi, err)
+		}
+	}
+
+	if err := h.zeroRange(base, size); err != nil {
+		t.Fatalf("zeroRange: %v", err)
+	}
+
+	// Every page must now be mapped: a per-page probe fill must hit EEXIST
+	// everywhere. A page the probe can still fill is one zeroRange skipped.
+	for pi := uint64(0); pi < pages; pi++ {
+		if _, err := ioctlZeropage(fd, base+pi*pageSize, pageSize); err != unix.EEXIST {
+			t.Fatalf("page %d left unmapped after zeroRange (probe err = %v, want EEXIST)", pi, err)
+		}
+	}
+}

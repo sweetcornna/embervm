@@ -223,26 +223,45 @@ func (h *Handler) populateZeroRun(from, to int) error {
 	return nil
 }
 
-// zeroRange maps zeros over a span, falling back pagewise on EEXIST.
+// zeroRange ensures every page of [dst, dst+length) is mapped, zero-filling
+// the missing ones. Concurrently-mapped pages are legal — demand faults,
+// removed-page serves, and guest writes all race the backfill — and any
+// page already mapped inside a zero range is authoritative (zeros, or a
+// newer guest write), so the fill skips it and RESUMES behind it. The
+// kernel stops a multi-page fill at the first mapped page: with progress it
+// reports EAGAIN plus the bytes done, at the head it reports EEXIST with
+// none. Treating either stop as "span done" (the old behavior, harmless at
+// per-chunk sizes) leaves the tail unfilled while the caller marks the
+// chunks populated — an unservable page fault later, which hangs whatever
+// touched the page (the e2e-m3 snapshot writer, 29 minutes).
 func (h *Handler) zeroRange(dst uint64, length uint64) error {
-	_, err := ioctlZeropage(h.uffd, dst, length)
-	if err == nil || err == unix.EEXIST {
-		h.stats.Zeropages.Add(length / 4096)
-		return nil
+	pageSize := uint64(4096)
+	if m := h.regionFor(dst); m != nil {
+		pageSize = m.PageSize
 	}
-	if err == unix.EAGAIN {
-		pageSize := uint64(4096)
-		if m := h.regionFor(dst); m != nil {
-			pageSize = m.PageSize
+	for stalls := 0; length > 0; {
+		done, err := ioctlZeropage(h.uffd, dst, length)
+		switch {
+		case err == nil:
+			h.stats.Zeropages.Add(length / 4096)
+			return nil
+		case err == unix.EEXIST:
+			// The page at the head is already mapped: keep it, move past.
+			n := min(pageSize, length)
+			dst, length = dst+n, length-n
+			stalls = 0
+		case err == unix.EAGAIN && done > 0:
+			// Partial fill; the next round decides what stopped it.
+			h.stats.Zeropages.Add(uint64(done) / 4096)
+			dst, length = dst+uint64(done), length-uint64(done)
+			stalls = 0
+		case err == unix.EAGAIN && stalls < 64:
+			stalls++ // mm churn with no progress; retry in place
+		default:
+			return fmt.Errorf("uffd: UFFDIO_ZEROPAGE dst=%#x len=%d: %w", dst, length, err)
 		}
-		for off := uint64(0); off < length; off += pageSize {
-			if zerr := h.zeroPage(dst+off, pageSize); zerr != nil {
-				return zerr
-			}
-		}
-		return nil
 	}
-	return fmt.Errorf("uffd: UFFDIO_ZEROPAGE dst=%#x len=%d: %w", dst, length, err)
+	return nil
 }
 
 // chunkedPrefetch is the restore pipeline's engine: eagerly load the

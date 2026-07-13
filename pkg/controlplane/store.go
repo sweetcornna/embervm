@@ -610,6 +610,17 @@ func (s *Store) UpsertNode(ctx context.Context, n Node) error {
 	return err
 }
 
+// RetireAbsentNodes marks every node NOT in keep as down. Static membership
+// makes the config the truth: rows left behind by an earlier topology (a
+// single-node deployment's 'local', a removed worker) must never win
+// placement — a stale unlimited-capacity row would swallow every Place and
+// route verbs to a node the registry cannot resolve.
+func (s *Store) RetireAbsentNodes(ctx context.Context, keep []string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET state='down' WHERE NOT (id = ANY($1))`, keep)
+	return err
+}
+
 // TouchNode records a successful health poll.
 func (s *Store) TouchNode(ctx context.Context, id string) error {
 	_, err := s.pool.Exec(ctx,
