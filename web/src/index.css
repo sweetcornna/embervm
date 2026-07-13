@@ -140,6 +140,16 @@ body {
   }
 }
 
+/* cmdk group headings */
+[cmdk-group-heading] {
+  padding: 0.5rem 0.75rem 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+}
+
 /* xterm.js bridge — the terminal must look native to the console. xterm's
    own colors come from the JS ITheme (lib/term.ts); this covers chrome. */
 .xterm {
