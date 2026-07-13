@@ -5,6 +5,7 @@
 // carries identity on the mark only), and a generated aria summary.
 
 import { useMemo, useRef, useState } from "react";
+import { useI18n } from "../lib/i18n";
 
 export interface SeriesPoint {
   at: number; // epoch ms
@@ -40,6 +41,7 @@ export function Sparkline(props: {
   color?: string; // series color; default accent
   trendWords?: [string, string, string]; // falling / steady / rising
 }) {
+  const { t } = useI18n();
   const color = props.color ?? "var(--color-accent)";
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<SeriesPoint | null>(null);
@@ -57,10 +59,14 @@ export function Sparkline(props: {
 
   const aria = useMemo(() => {
     const pts = props.points;
-    if (pts.length === 0) return `${props.label}: no data`;
+    if (pts.length === 0) return `${props.label}: ${t("no data", "无数据")}`;
     const last = pts[pts.length - 1].value;
     const prev = pts[Math.max(0, pts.length - 13)].value; // ~30s back at 2.5s cadence
-    const [fall, steady, rise] = props.trendWords ?? ["falling", "steady", "rising"];
+    const [fall, steady, rise] = props.trendWords ?? [
+      t("falling", "下降"),
+      t("steady", "平稳"),
+      t("rising", "上升"),
+    ];
     const trend =
       Math.abs(last - prev) < Math.max(1e-9, Math.abs(prev) * 0.03)
         ? steady
@@ -68,7 +74,7 @@ export function Sparkline(props: {
           ? rise
           : fall;
     return `${props.label}: ${props.format(last)}, ${trend}`;
-  }, [props.points, props.label, props.format, props.trendWords]);
+  }, [props.points, props.label, props.format, props.trendWords, t]);
 
   if (!built) {
     return (
@@ -77,7 +83,7 @@ export function Sparkline(props: {
         aria-label={aria}
         className="flex h-16 items-center justify-center rounded bg-bg text-[11px] text-faint"
       >
-        collecting…
+        {t("collecting…", "采集中…")}
       </div>
     );
   }

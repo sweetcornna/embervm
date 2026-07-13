@@ -37,6 +37,7 @@ import {
   readGuestFile,
   writeGuestFile,
 } from "../../lib/files";
+import { useI18n } from "../../lib/i18n";
 import { toast } from "../../lib/toast";
 import { Editor } from "./Editor";
 
@@ -53,6 +54,7 @@ interface OpenFile {
 export function FilesTab(props: { sb: Sandbox }) {
   const { sb } = props;
   const qc = useQueryClient();
+  const { t } = useI18n();
   const [file, setFile] = useState<OpenFile | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -91,7 +93,7 @@ export function FilesTab(props: { sb: Sandbox }) {
         generation: genRef.current++,
       });
     } catch (err) {
-      toast.error(`Open ${baseName(path)} failed`, (err as Error).message);
+      toast.error(`${t("Open", "打开")} ${baseName(path)} ${t("failed", "失败")}`, (err as Error).message);
     } finally {
       setBusy(false);
     }
@@ -104,9 +106,9 @@ export function FilesTab(props: { sb: Sandbox }) {
       await writeGuestFile(sb.id, file.path, text);
       setFile({ ...file, text, size: new TextEncoder().encode(text).length });
       setDirty(false);
-      toast.success(`Saved ${baseName(file.path)}`);
+      toast.success(`${t("Saved", "已保存")} ${baseName(file.path)}`);
     } catch (err) {
-      toast.error("Save failed", (err as Error).message);
+      toast.error(t("Save failed", "保存失败"), (err as Error).message);
     } finally {
       setSaving(false);
     }
@@ -118,7 +120,7 @@ export function FilesTab(props: { sb: Sandbox }) {
       await refreshTree();
       await openFile(path, true);
     } catch (err) {
-      toast.error("Create failed", (err as Error).message);
+      toast.error(t("Create failed", "创建失败"), (err as Error).message);
     }
   }
 
@@ -126,9 +128,9 @@ export function FilesTab(props: { sb: Sandbox }) {
     try {
       await writeGuestFile(sb.id, joinPath(dir, f.name), f);
       await refreshTree();
-      toast.success(`Uploaded ${f.name}`, `to ${dir}`);
+      toast.success(`${t("Uploaded", "已上传")} ${f.name}`, `${t("to", "至")} ${dir}`);
     } catch (err) {
-      toast.error("Upload failed", (err as Error).message);
+      toast.error(t("Upload failed", "上传失败"), (err as Error).message);
     }
   }
 
@@ -137,8 +139,8 @@ export function FilesTab(props: { sb: Sandbox }) {
       <Empty>
         <div className="mx-auto max-w-sm space-y-2">
           <IconFile size={22} className="mx-auto text-faint" />
-          <p>The file browser needs a running guest.</p>
-          <p className="text-faint">Resume the sandbox from the header to browse its disk.</p>
+          <p>{t("The file browser needs a running guest.", "文件浏览器需要运行中的 guest。")}</p>
+          <p className="text-faint">{t("Resume the sandbox from the header to browse its disk.", "从顶部恢复沙箱即可浏览其磁盘。")}</p>
         </div>
       </Empty>
     );
@@ -153,21 +155,21 @@ export function FilesTab(props: { sb: Sandbox }) {
           <div className="flex h-full min-h-0 flex-col border-r border-hairline">
             <div className="flex items-center justify-between border-b border-hairline px-2 py-1">
               <span className="px-1 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-                guest disk
+                {t("guest disk", "guest 磁盘")}
               </span>
               <div className="flex">
-                <Tip content="New file">
-                  <IconButton label="New file" onClick={() => setNewFileOpen(true)}>
+                <Tip content={t("New file", "新建文件")}>
+                  <IconButton label={t("New file", "新建文件")} onClick={() => setNewFileOpen(true)}>
                     <IconPlus size={13} />
                   </IconButton>
                 </Tip>
-                <Tip content={`Upload to ${currentDir}`}>
-                  <IconButton label="Upload file" onClick={() => uploadRef.current?.click()}>
+                <Tip content={`${t("Upload to", "上传到")} ${currentDir}`}>
+                  <IconButton label={t("Upload file", "上传文件")} onClick={() => uploadRef.current?.click()}>
                     <IconUpload size={13} />
                   </IconButton>
                 </Tip>
-                <Tip content="Refresh listing">
-                  <IconButton label="Refresh" onClick={() => void refreshTree()}>
+                <Tip content={t("Refresh listing", "刷新列表")}>
+                  <IconButton label={t("Refresh", "刷新")} onClick={() => void refreshTree()}>
                     <IconRefresh size={13} />
                   </IconButton>
                 </Tip>
@@ -194,24 +196,24 @@ export function FilesTab(props: { sb: Sandbox }) {
               <div className="flex items-center gap-2 border-b border-hairline px-3 py-1.5">
                 <button
                   className="min-w-0 truncate font-mono text-[12px] text-muted hover:text-ink"
-                  title="Copy path"
+                  title={t("Copy path", "复制路径")}
                   onClick={() => {
                     void navigator.clipboard.writeText(file.path);
-                    toast.info("Path copied");
+                    toast.info(t("Path copied", "已复制路径"));
                   }}
                 >
                   {file.path}
                 </button>
                 {dirty && (
-                  <span aria-label="Unsaved changes" className="size-1.5 shrink-0 rounded-full bg-accent" />
+                  <span aria-label={t("Unsaved changes", "未保存的更改")} className="size-1.5 shrink-0 rounded-full bg-accent" />
                 )}
                 <span className="ml-auto shrink-0 font-mono text-[11px] text-faint">
                   {file.size.toLocaleString()} B
-                  {file.readOnly && " · read-only (large file)"}
+                  {file.readOnly && ` · ${t("read-only (large file)", "只读（大文件）")}`}
                 </span>
-                <Tip content="Download">
+                <Tip content={t("Download", "下载")}>
                   <IconButton
-                    label="Download file"
+                    label={t("Download file", "下载文件")}
                     onClick={() => void downloadGuestFile(sb.id, file.path)}
                   >
                     <IconDownload size={13} />
@@ -223,9 +225,9 @@ export function FilesTab(props: { sb: Sandbox }) {
                   disabled={!dirty || file.readOnly || file.binary}
                   busy={saving}
                   onClick={() => void save(latestTextRef.current)}
-                  title="Save (⌘S)"
+                  title={`${t("Save", "保存")} (⌘S)`}
                 >
-                  Save
+                  {t("Save", "保存")}
                 </Button>
               </div>
             )}
@@ -238,9 +240,9 @@ export function FilesTab(props: { sb: Sandbox }) {
               {!file && (
                 <Empty>
                   <div className="mx-auto max-w-xs space-y-1.5">
-                    <p>Select a file to view or edit it.</p>
+                    <p>{t("Select a file to view or edit it.", "选择一个文件以查看或编辑。")}</p>
                     <p className="text-faint">
-                      Saves go straight to the guest disk (<Mono>PUT /files</Mono>).
+                      {t("Saves go straight to the guest disk", "保存直接写入 guest 磁盘")} (<Mono>PUT /files</Mono>).
                     </p>
                   </div>
                 </Empty>
@@ -249,10 +251,10 @@ export function FilesTab(props: { sb: Sandbox }) {
                 <Empty>
                   <div className="space-y-3">
                     <p>
-                      <Mono>{baseName(file.path)}</Mono> looks binary ({file.size.toLocaleString()} B).
+                      <Mono>{baseName(file.path)}</Mono> {t("looks binary", "看起来是二进制文件")} ({file.size.toLocaleString()} B).
                     </p>
                     <Button onClick={() => void downloadGuestFile(sb.id, file.path)}>
-                      <IconDownload size={13} /> Download
+                      <IconDownload size={13} /> {t("Download", "下载")}
                     </Button>
                   </div>
                 </Empty>
@@ -261,11 +263,11 @@ export function FilesTab(props: { sb: Sandbox }) {
                 <Empty>
                   <div className="space-y-3">
                     <p>
-                      <Mono>{baseName(file.path)}</Mono> is {(file.size / 1048576).toFixed(1)} MiB —
-                      too large to edit here.
+                      <Mono>{baseName(file.path)}</Mono> {t("is", "为")} {(file.size / 1048576).toFixed(1)} MiB —{" "}
+                      {t("too large to edit here", "过大，无法在此编辑")}.
                     </p>
                     <Button onClick={() => void downloadGuestFile(sb.id, file.path)}>
-                      <IconDownload size={13} /> Download
+                      <IconDownload size={13} /> {t("Download", "下载")}
                     </Button>
                   </div>
                 </Empty>
@@ -290,14 +292,14 @@ export function FilesTab(props: { sb: Sandbox }) {
 
       <ConfirmDialog
         open={pendingOpen !== null}
-        title="Discard unsaved changes?"
+        title={t("Discard unsaved changes?", "放弃未保存的更改？")}
         body={
           <>
-            <Mono className="text-ink">{file ? baseName(file.path) : ""}</Mono> has unsaved changes.
-            Opening another file discards them.
+            <Mono className="text-ink">{file ? baseName(file.path) : ""}</Mono>{" "}
+            {t("has unsaved changes. Opening another file discards them.", "有未保存的更改。打开其他文件将丢弃它们。")}
           </>
         }
-        confirmLabel="Discard changes"
+        confirmLabel={t("Discard changes", "放弃更改")}
         onConfirm={() => {
           const next = pendingOpen;
           setPendingOpen(null);
@@ -324,13 +326,14 @@ function NewFileDialog(props: {
   onClose: () => void;
   onCreate: (path: string) => void;
 }) {
+  const { t } = useI18n();
   const [path, setPath] = useState("");
   useEffect(() => {
     if (props.open) setPath(props.dir === "/" ? "/" : props.dir + "/");
   }, [props.open, props.dir]);
   const valid = path.startsWith("/") && !path.endsWith("/") && path.length > 1;
   return (
-    <Dialog title="New file" open={props.open} onClose={props.onClose}>
+    <Dialog title={t("New file", "新建文件")} open={props.open} onClose={props.onClose}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -339,7 +342,7 @@ function NewFileDialog(props: {
         }}
       >
         <label className="block">
-          <div className="mb-1.5 text-xs font-medium text-muted">Absolute path</div>
+          <div className="mb-1.5 text-xs font-medium text-muted">{t("Absolute path", "绝对路径")}</div>
           <input
             className={`${inputCls} font-mono`}
             value={path}
@@ -348,9 +351,9 @@ function NewFileDialog(props: {
           />
         </label>
         <div className="flex justify-end gap-2">
-          <Button onClick={props.onClose}>Cancel</Button>
+          <Button onClick={props.onClose}>{t("Cancel", "取消")}</Button>
           <Button kind="primary" type="submit" disabled={!valid}>
-            Create
+            {t("Create", "创建")}
           </Button>
         </div>
       </form>

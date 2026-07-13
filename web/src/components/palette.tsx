@@ -6,14 +6,16 @@ import { Command } from "cmdk";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useSandboxes, useSandboxAction, verbs } from "../api/hooks";
-import { STATE_META } from "./status";
+import { STATE_META, stateLabel } from "./status";
 import { CreateSandboxDialog } from "./createSandbox";
 import { Dialog, KBD } from "./ui";
+import { useI18n } from "../lib/i18n";
 import { installShortcuts, onShortcut } from "../lib/shortcuts";
 import { toast, toastError } from "../lib/toast";
 import type { SandboxState } from "../api/types";
 
 export function CommandPalette() {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -48,16 +50,16 @@ export function CommandPalette() {
   const pause = useSandboxAction(() => verbs.pause(currentId!), {
     sandboxId: currentId,
     optimistic: () => ({ state: "PAUSING" as SandboxState }),
-    onError: toastError("Pause failed"),
+    onError: toastError(t("Pause failed", "暂停失败")),
   });
   const resume = useSandboxAction(() => verbs.resume(currentId!), {
     sandboxId: currentId,
     optimistic: () => ({ state: "RESUMING" as SandboxState }),
-    onError: toastError("Resume failed"),
+    onError: toastError(t("Resume failed", "恢复失败")),
   });
   const snapshot = useSandboxAction(() => verbs.snapshot(currentId!, "console"), {
-    onSuccess: () => toast.success("Snapshot taken"),
-    onError: toastError("Snapshot failed"),
+    onSuccess: () => toast.success(t("Snapshot taken", "已快照")),
+    onError: toastError(t("Snapshot failed", "快照失败")),
   });
 
   return (
@@ -65,45 +67,45 @@ export function CommandPalette() {
       <Command.Dialog
         open={open}
         onOpenChange={setOpen}
-        label="Command palette"
+        label={t("Command palette", "命令面板")}
         className="fixed inset-0 z-[70] grid place-items-start justify-center bg-black/50 pt-[12vh] backdrop-blur-[1px]"
         // cmdk renders a wrapper; the real dialog is inside
       >
         <div className="enter-down w-[min(36rem,92vw)] overflow-hidden rounded-xl border border-border bg-raised shadow-[var(--shadow-overlay)]">
           <Command.Input
-            placeholder="Search sandboxes, run a command…"
+            placeholder={t("Search sandboxes, run a command…", "搜索沙箱、执行命令…")}
             className="w-full border-b border-hairline bg-transparent px-4 py-3.5 text-[14px] text-ink outline-none placeholder:text-faint"
           />
           <Command.List className="max-h-80 overflow-y-auto p-1.5">
             <Command.Empty className="px-3 py-6 text-center text-[13px] text-faint">
-              No matches.
+              {t("No matches.", "无匹配。")}
             </Command.Empty>
 
-            <Command.Group heading="Navigate" className="cmdk-group">
-              <Item onSelect={() => run(() => nav("/"))}>Overview</Item>
-              <Item onSelect={() => run(() => nav("/sandboxes"))}>Sandboxes</Item>
-              <Item onSelect={() => run(() => nav("/nodes"))}>Nodes</Item>
-              <Item onSelect={() => run(() => nav("/templates"))}>Templates</Item>
-              <Item onSelect={() => run(() => nav("/storage"))}>Storage</Item>
+            <Command.Group heading={t("Navigate", "导航")} className="cmdk-group">
+              <Item onSelect={() => run(() => nav("/"))}>{t("Overview", "总览")}</Item>
+              <Item onSelect={() => run(() => nav("/sandboxes"))}>{t("Sandboxes", "沙箱")}</Item>
+              <Item onSelect={() => run(() => nav("/nodes"))}>{t("Nodes", "节点")}</Item>
+              <Item onSelect={() => run(() => nav("/templates"))}>{t("Templates", "模板")}</Item>
+              <Item onSelect={() => run(() => nav("/storage"))}>{t("Storage", "存储")}</Item>
             </Command.Group>
 
-            <Command.Group heading="Actions" className="cmdk-group">
-              <Item onSelect={() => run(() => setCreating(true))}>Create sandbox…</Item>
+            <Command.Group heading={t("Actions", "操作")} className="cmdk-group">
+              <Item onSelect={() => run(() => setCreating(true))}>{t("Create sandbox…", "创建沙箱…")}</Item>
               {currentId && (
                 <>
-                  <Item onSelect={() => run(() => pause.mutate())}>Pause this sandbox</Item>
-                  <Item onSelect={() => run(() => resume.mutate())}>Resume this sandbox</Item>
-                  <Item onSelect={() => run(() => snapshot.mutate())}>Snapshot this sandbox</Item>
+                  <Item onSelect={() => run(() => pause.mutate())}>{t("Pause this sandbox", "暂停此沙箱")}</Item>
+                  <Item onSelect={() => run(() => resume.mutate())}>{t("Resume this sandbox", "恢复此沙箱")}</Item>
+                  <Item onSelect={() => run(() => snapshot.mutate())}>{t("Snapshot this sandbox", "为此沙箱快照")}</Item>
                   <Item onSelect={() => run(() => nav(`/sandboxes/${currentId}/terminal`))}>
-                    Open terminal
+                    {t("Open terminal", "打开终端")}
                   </Item>
                 </>
               )}
-              <Item onSelect={() => run(() => setHelpOpen(true))}>Keyboard shortcuts</Item>
+              <Item onSelect={() => run(() => setHelpOpen(true))}>{t("Keyboard shortcuts", "键盘快捷键")}</Item>
             </Command.Group>
 
             {(sandboxes.data ?? []).length > 0 && (
-              <Command.Group heading="Sandboxes" className="cmdk-group">
+              <Command.Group heading={t("Sandboxes", "沙箱")} className="cmdk-group">
                 {(sandboxes.data ?? []).slice(0, 50).map((sb) => (
                   <Item
                     key={sb.id}
@@ -117,7 +119,7 @@ export function CommandPalette() {
                         style={{ background: STATE_META[sb.state]?.color ?? "var(--color-idle)" }}
                       />
                       <span className="font-mono">{sb.id.slice(0, 8)}</span>
-                      <span className="text-faint">{STATE_META[sb.state]?.label ?? sb.state}</span>
+                      <span className="text-faint">{stateLabel(sb.state, t)}</span>
                     </span>
                   </Item>
                 ))}
@@ -146,20 +148,21 @@ function Item(props: { children: React.ReactNode; onSelect: () => void; value?: 
 }
 
 function HelpDialog(props: { open: boolean; onClose: () => void }) {
+  const { t } = useI18n();
   const rows: Array<[React.ReactNode, string]> = [
-    [<KBD key="k">⌘K</KBD>, "Command palette"],
+    [<KBD key="k">⌘K</KBD>, t("Command palette", "命令面板")],
     [
       <span key="g" className="flex gap-1">
         <KBD>g</KBD> <KBD>o/s/n/t/g</KBD>
       </span>,
-      "Go to Overview / Sandboxes / Nodes / Templates / storaGe",
+      t("Go to Overview / Sandboxes / Nodes / Templates / storaGe", "跳转到 总览 / 沙箱 / 节点 / 模板 / 存储(storaGe)"),
     ],
-    [<KBD key="s">⌘S</KBD>, "Save file (in the editor)"],
-    [<KBD key="e">⌘↵</KBD>, "Run (in a command field)"],
-    [<KBD key="q">?</KBD>, "This help"],
+    [<KBD key="s">⌘S</KBD>, t("Save file (in the editor)", "保存文件（在编辑器中）")],
+    [<KBD key="e">⌘↵</KBD>, t("Run (in a command field)", "运行（在命令输入框中）")],
+    [<KBD key="q">?</KBD>, t("This help", "本帮助")],
   ];
   return (
-    <Dialog title="Keyboard shortcuts" open={props.open} onClose={props.onClose}>
+    <Dialog title={t("Keyboard shortcuts", "键盘快捷键")} open={props.open} onClose={props.onClose}>
       <dl className="space-y-2.5">
         {rows.map(([keys, desc], i) => (
           <div key={i} className="flex items-center justify-between gap-4">

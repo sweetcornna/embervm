@@ -7,6 +7,7 @@ import type { Sandbox } from "../../api/types";
 import { IconGlobe, IconRefresh } from "../../components/icons";
 import { Tip } from "../../components/tooltip";
 import { Button, Empty, ErrorNote, IconButton, Mono, inputCls } from "../../components/ui";
+import { useI18n } from "../../lib/i18n";
 import { ensureProxySession, proxyURL } from "../../lib/proxy";
 
 const QUICK_PORTS = [3000, 5173, 8000, 8080];
@@ -26,6 +27,7 @@ function loadRecent(id: string): number[] {
 
 export function PreviewTab(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const running = sb.state === "RUNNING";
   const [port, setPort] = useState<number | null>(() => loadRecent(sb.id)[0] ?? null);
   const [portInput, setPortInput] = useState(port ? String(port) : "");
@@ -59,7 +61,7 @@ export function PreviewTab(props: { sb: Sandbox }) {
       <Empty>
         <div className="mx-auto max-w-sm space-y-2">
           <IconGlobe size={22} className="mx-auto text-faint" />
-          <p>Preview needs a running guest.</p>
+          <p>{t("Preview needs a running guest.", "预览需要运行中的 guest。")}</p>
         </div>
       </Empty>
     );
@@ -75,7 +77,7 @@ export function PreviewTab(props: { sb: Sandbox }) {
           }}
         >
           <label className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-            port
+            {t("port", "端口")}
           </label>
           <input
             className={`${inputCls} w-24 font-mono`}
@@ -83,19 +85,19 @@ export function PreviewTab(props: { sb: Sandbox }) {
             onChange={(e) => setPortInput(e.target.value.replace(/\D/g, ""))}
             placeholder="8080"
             inputMode="numeric"
-            aria-label="Guest port"
+            aria-label={t("Guest port", "guest 端口")}
           />
           <label className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-            path
+            {t("path", "路径")}
           </label>
           <input
             className={`${inputCls} w-40 font-mono`}
             value={path}
             onChange={(e) => setPath(e.target.value)}
-            aria-label="Path"
+            aria-label={t("Path", "路径")}
           />
           <Button size="sm" kind="primary" type="submit" disabled={!portInput}>
-            Open
+            {t("Open", "打开")}
           </Button>
         </form>
         <div className="flex items-center gap-1">
@@ -119,8 +121,12 @@ export function PreviewTab(props: { sb: Sandbox }) {
               code there would run at the console's origin and could read the
               bearer token from localStorage. Preview stays inside the
               opaque-origin sandboxed iframe only. */}
-          <Tip content="Reload preview">
-            <IconButton label="Reload" onClick={() => setGeneration((g) => g + 1)} disabled={!src}>
+          <Tip content={t("Reload preview", "刷新预览")}>
+            <IconButton
+              label={t("Reload", "刷新")}
+              onClick={() => setGeneration((g) => g + 1)}
+              disabled={!src}
+            >
               <IconRefresh size={13} />
             </IconButton>
           </Tip>
@@ -136,19 +142,24 @@ export function PreviewTab(props: { sb: Sandbox }) {
           <Empty>
             <div className="mx-auto max-w-md space-y-3 text-left">
               <p className="text-center">
-                Anything listening inside the guest is one URL away.
+                {t(
+                  "Anything listening inside the guest is one URL away.",
+                  "guest 里任何监听的服务，都只有一个 URL 之遥。",
+                )}
               </p>
               <p className="text-faint">
-                Start a server in the Terminal tab, then open its port here — for example:
+                {t(
+                  "Start a server in the Terminal tab, then open its port here — for example:",
+                  "在「终端」标签里起一个服务，然后在这里打开它的端口 —— 例如：",
+                )}
               </p>
               <pre className="rounded-md border border-hairline bg-surface p-3 font-mono text-xs text-ink">
                 python3 -m http.server 8000
               </pre>
               <p className="text-faint">
-                The proxy is WebSocket-transparent, so dev servers with HMR work too. External
-                REST clients can hit{" "}
-                <Mono className="text-ink">/v0/sandboxes/:id/proxy/:port/…</Mono> with a bearer
-                token.
+                {t("The proxy is WebSocket-transparent, so dev servers with HMR work too. External REST clients can hit", "代理对 WebSocket 透明，因此带 HMR 的开发服务器也能用。外部 REST 客户端可携带 bearer 令牌访问")}{" "}
+                <Mono className="text-ink">/v0/sandboxes/:id/proxy/:port/…</Mono>
+                {t(" with a bearer token.", "。")}
               </p>
             </div>
           </Empty>
@@ -158,7 +169,7 @@ export function PreviewTab(props: { sb: Sandbox }) {
             key={`${port}#${generation}`}
             ref={iframeRef}
             src={src}
-            title={`Guest port ${port}`}
+            title={`${t("Guest port", "guest 端口")} ${port}`}
             className="h-full w-full border-0 bg-white"
             // The proxy is same-origin with the console, so allow-same-origin
             // would give guest-served (untrusted, agent-controlled) scripts

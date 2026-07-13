@@ -6,7 +6,7 @@ import type { Sandbox, SandboxState } from "../api/types";
 import { CreateSandboxDialog } from "../components/createSandbox";
 import { IconChevronDown, IconDots } from "../components/icons";
 import { Menu, MenuItem, MenuSeparator } from "../components/menu";
-import { MemGauge, STATE_META, StateBadge } from "../components/status";
+import { MemGauge, StateBadge, stateLabel } from "../components/status";
 import {
   Button,
   ConfirmDialog,
@@ -17,6 +17,7 @@ import {
   Table,
   inputCls,
 } from "../components/ui";
+import { useI18n } from "../lib/i18n";
 import { disposeTermSandbox } from "../lib/termBridge";
 import { toast, toastError } from "../lib/toast";
 
@@ -39,6 +40,7 @@ const STATE_RANK: SandboxState[] = [
 ];
 
 export function Sandboxes() {
+  const { t } = useI18n();
   const { data, isLoading } = useSandboxes();
   const [creating, setCreating] = useState(false);
   const [query, setQuery] = useState("");
@@ -84,11 +86,11 @@ export function Sandboxes() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Sandboxes"
-        subtitle={all.length > 0 ? `${all.length} total` : undefined}
+        title={t("Sandboxes", "沙箱")}
+        subtitle={all.length > 0 ? `${all.length} ${t("total", "总计")}` : undefined}
         actions={
           <Button kind="primary" onClick={() => setCreating(true)}>
-            New sandbox
+            {t("New sandbox", "新建沙箱")}
           </Button>
         }
       />
@@ -98,8 +100,8 @@ export function Sandboxes() {
           className={`${inputCls} max-w-xs`}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter by id, template, node…"
-          aria-label="Filter sandboxes"
+          placeholder={t("Filter by id, template, node…", "按 id、模板、节点筛选…")}
+          aria-label={t("Filter sandboxes", "筛选沙箱")}
         />
         <div className="flex flex-wrap gap-1">
           {chips.map((c) => (
@@ -112,7 +114,7 @@ export function Sandboxes() {
                   : "border-border text-muted hover:border-accent/40 hover:text-ink"
               }`}
             >
-              {c === "all" ? `All ${all.length}` : `${STATE_META[c].label} ${counts.get(c) ?? 0}`}
+              {c === "all" ? `${t("All", "全部")} ${all.length}` : `${stateLabel(c, t)} ${counts.get(c) ?? 0}`}
             </button>
           ))}
         </div>
@@ -120,12 +122,12 @@ export function Sandboxes() {
 
       <Table
         head={[
-          <SortHeader key="s" label="State" active={sort.key === "state"} dir={sort.dir} onClick={() => toggleSort("state")} />,
-          "Sandbox",
-          <SortHeader key="m" label="Memory" active={sort.key === "memory"} dir={sort.dir} onClick={() => toggleSort("memory")} />,
-          "vCPUs",
-          "Node",
-          <SortHeader key="a" label="Age" active={sort.key === "age"} dir={sort.dir} onClick={() => toggleSort("age")} />,
+          <SortHeader key="s" label={t("State", "状态")} active={sort.key === "state"} dir={sort.dir} onClick={() => toggleSort("state")} />,
+          t("Sandbox", "沙箱"),
+          <SortHeader key="m" label={t("Memory", "内存")} active={sort.key === "memory"} dir={sort.dir} onClick={() => toggleSort("memory")} />,
+          t("vCPUs", "vCPU"),
+          t("Node", "节点"),
+          <SortHeader key="a" label={t("Age", "时长")} active={sort.key === "age"} dir={sort.dir} onClick={() => toggleSort("age")} />,
           "",
         ]}
       >
@@ -140,10 +142,15 @@ export function Sandboxes() {
         </div>
       )}
       {!isLoading && all.length === 0 && (
-        <Empty>No sandboxes. “New sandbox” boots one from a READY template.</Empty>
+        <Empty>
+          {t(
+            "No sandboxes. “New sandbox” boots one from a READY template.",
+            "暂无沙箱。点击“新建沙箱”从 READY 模板启动一个。",
+          )}
+        </Empty>
       )}
       {!isLoading && all.length > 0 && rows.length === 0 && (
-        <Empty>No sandboxes match this filter.</Empty>
+        <Empty>{t("No sandboxes match this filter.", "没有沙箱匹配此筛选。")}</Empty>
       )}
 
       <CreateSandboxDialog open={creating} onClose={() => setCreating(false)} />
@@ -171,29 +178,30 @@ function SortHeader(props: { label: string; active: boolean; dir: 1 | -1; onClic
 
 function Row(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const nav = useNavigate();
   const [confirmKill, setConfirmKill] = useState(false);
   const pause = useSandboxAction(() => verbs.pause(sb.id), {
     sandboxId: sb.id,
     optimistic: () => ({ state: "PAUSING" as SandboxState }),
-    onError: toastError("Pause failed"),
+    onError: toastError(t("Pause failed", "暂停失败")),
   });
   const resume = useSandboxAction(() => verbs.resume(sb.id), {
     sandboxId: sb.id,
     optimistic: () => ({ state: "RESUMING" as SandboxState }),
-    onError: toastError("Resume failed"),
+    onError: toastError(t("Resume failed", "恢复失败")),
   });
   const fork = useSandboxAction(() => verbs.fork(sb.id), {
     sandboxId: sb.id,
     onSuccess: (child) => nav(`/sandboxes/${child.id}`),
-    onError: toastError("Fork failed"),
+    onError: toastError(t("Fork failed", "派生失败")),
   });
   const kill = useSandboxAction(() => verbs.kill(sb.id), {
     onSuccess: () => {
       disposeTermSandbox(sb.id);
-      toast.success(`Sandbox ${sb.id.slice(0, 8)} destroyed`);
+      toast.success(`${t("Sandbox", "沙箱")} ${sb.id.slice(0, 8)} ${t("destroyed", "已销毁")}`);
     },
-    onError: toastError("Kill failed"),
+    onError: toastError(t("Kill failed", "销毁失败")),
   });
   const running = sb.state === "RUNNING";
   const pausedLike = sb.state.startsWith("PAUSED") || sb.state === "ARCHIVED_COLD" || sb.state === "FAILED";
@@ -231,34 +239,34 @@ function Row(props: { sb: Sandbox }) {
         <Menu
           trigger={
             <button
-              aria-label={`Actions for ${sb.id.slice(0, 8)}`}
+              aria-label={`${t("Actions for", "操作")} ${sb.id.slice(0, 8)}`}
               className="inline-flex size-7 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-ink"
             >
               <IconDots />
             </button>
           }
         >
-          <MenuItem onSelect={() => nav(`/sandboxes/${sb.id}`)}>Open workspace</MenuItem>
-          {running && <MenuItem onSelect={() => pause.mutate()}>Pause</MenuItem>}
-          {pausedLike && <MenuItem onSelect={() => resume.mutate()}>Resume</MenuItem>}
+          <MenuItem onSelect={() => nav(`/sandboxes/${sb.id}`)}>{t("Open workspace", "打开工作区")}</MenuItem>
+          {running && <MenuItem onSelect={() => pause.mutate()}>{t("Pause", "暂停")}</MenuItem>}
+          {pausedLike && <MenuItem onSelect={() => resume.mutate()}>{t("Resume", "恢复")}</MenuItem>}
           <MenuItem onSelect={() => fork.mutate()} disabled={!running}>
-            Fork
+            {t("Fork", "派生")}
           </MenuItem>
           <MenuSeparator />
           <MenuItem danger onSelect={() => setConfirmKill(true)}>
-            Kill…
+            {t("Kill…", "销毁…")}
           </MenuItem>
         </Menu>
         <ConfirmDialog
           open={confirmKill}
-          title="Kill sandbox"
+          title={t("Kill sandbox", "销毁沙箱")}
           body={
             <>
-              Destroy <Mono className="text-ink">{sb.id.slice(0, 8)}</Mono>? Its disk, checkpoints and
-              snapshots are deleted.
+              {t("Destroy", "销毁")} <Mono className="text-ink">{sb.id.slice(0, 8)}</Mono>
+              {t("? Its disk, checkpoints and snapshots are deleted.", "？其磁盘、检查点和快照都将被删除。")}
             </>
           }
-          confirmLabel="Kill sandbox"
+          confirmLabel={t("Kill sandbox", "销毁沙箱")}
           busy={kill.isPending}
           onConfirm={() => {
             kill.mutate();

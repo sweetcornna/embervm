@@ -4,6 +4,7 @@ import { fmtBytes, fmtPct } from "../api/client";
 import { useStorageReport } from "../api/hooks";
 import type { StorageReport } from "../api/types";
 import { Card, Empty, Mono, PageHeader, Skeleton, Stat, Table } from "../components/ui";
+import { useI18n } from "../lib/i18n";
 
 const TIER_COLOR: Record<string, string> = {
   hot: "var(--color-hot)",
@@ -17,6 +18,7 @@ const TIER_ORDER = ["hot", "warm", "cold", "recycled", "none"];
 type SortKey = "logical" | "stored" | "ratio";
 
 export function Storage() {
+  const { t } = useI18n();
   const { data, isLoading } = useStorageReport();
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "stored", dir: -1 });
 
@@ -46,22 +48,25 @@ export function Storage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Storage"
-        subtitle="What each sandbox's snapshots cost after zero-skip, lz4, and dedup."
+        title={t("Storage", "存储")}
+        subtitle={t(
+          "What each sandbox's snapshots cost after zero-skip, lz4, and dedup.",
+          "每个沙箱的快照在零页跳过、lz4 与去重之后的实际开销。",
+        )}
       />
 
       <div className="grid grid-cols-3 gap-3">
-        <Stat label="Logical" value={fmtBytes(logical)} />
-        <Stat label="Stored" value={fmtBytes(stored)} accent />
+        <Stat label={t("Logical", "逻辑大小")} value={fmtBytes(logical)} />
+        <Stat label={t("Stored", "实际存储")} value={fmtBytes(stored)} accent />
         <Stat
-          label="Paying for"
+          label={t("Paying for", "实付占比")}
           value={logical > 0 ? fmtPct(stored / logical) : "—"}
-          sub="stored ÷ logical after dedup"
+          sub={t("stored ÷ logical after dedup", "去重后 实存÷逻辑")}
         />
       </div>
 
       {tierTotal > 0 && (
-        <Card title="Stored bytes by tier">
+        <Card title={t("Stored bytes by tier", "按层级的存储字节")}>
           <div className="space-y-2">
             <div className="flex h-3 w-full overflow-hidden rounded-full bg-overlay">
               {byTier.map((t, i) => (
@@ -92,12 +97,12 @@ export function Storage() {
 
       <Table
         head={[
-          "Sandbox",
-          "Tier",
-          <SortHeader key="l" label="Logical" active={sort.key === "logical"} dir={sort.dir} onClick={() => toggle("logical")} />,
-          <SortHeader key="s" label="Stored" active={sort.key === "stored"} dir={sort.dir} onClick={() => toggle("stored")} />,
-          <SortHeader key="r" label="Ratio" active={sort.key === "ratio"} dir={sort.dir} onClick={() => toggle("ratio")} />,
-          "Layers",
+          t("Sandbox", "沙箱"),
+          t("Tier", "层级"),
+          <SortHeader key="l" label={t("Logical", "逻辑大小")} active={sort.key === "logical"} dir={sort.dir} onClick={() => toggle("logical")} />,
+          <SortHeader key="s" label={t("Stored", "实际存储")} active={sort.key === "stored"} dir={sort.dir} onClick={() => toggle("stored")} />,
+          <SortHeader key="r" label={t("Ratio", "比率")} active={sort.key === "ratio"} dir={sort.dir} onClick={() => toggle("ratio")} />,
+          t("Layers", "层数"),
         ]}
       >
         {rows.map((r) => (
@@ -138,7 +143,7 @@ export function Storage() {
       </Table>
       {isLoading && <Skeleton className="h-24 w-full" />}
       {!isLoading && sandboxes.length === 0 && (
-        <Empty>Nothing stored yet — pause a sandbox to see its footprint.</Empty>
+        <Empty>{t("Nothing stored yet — pause a sandbox to see its footprint.", "暂无存储 —— 暂停一个沙箱即可查看其占用。")}</Empty>
       )}
     </div>
   );

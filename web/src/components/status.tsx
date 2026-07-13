@@ -6,26 +6,40 @@
 
 import type { SandboxState } from "../api/types";
 import { fmtMiB } from "../api/client";
+import { useI18n } from "../lib/i18n";
+import type { TFn } from "../lib/i18n";
 
-type Meta = { color: string; label: string };
+type Meta = { color: string; label: string; zh: string };
 
 export const STATE_META: Record<SandboxState, Meta> = {
-  RUNNING: { color: "var(--color-ok)", label: "Running" },
-  PAUSED_HOT: { color: "var(--color-hot)", label: "Paused · hot" },
-  PAUSED_WARM: { color: "var(--color-warm)", label: "Paused · warm" },
-  ARCHIVED_COLD: { color: "var(--color-cold)", label: "Archived · cold" },
-  STOPPED: { color: "var(--color-idle)", label: "Stopped" },
-  RECYCLED: { color: "var(--color-idle)", label: "Recycled" },
-  FAILED: { color: "var(--color-danger)", label: "Failed" },
-  PENDING: { color: "var(--color-transit)", label: "Pending" },
-  STARTING: { color: "var(--color-transit)", label: "Starting" },
-  RESUMING: { color: "var(--color-transit)", label: "Resuming" },
-  PAUSING: { color: "var(--color-transit)", label: "Pausing" },
-  STOPPING: { color: "var(--color-transit)", label: "Stopping" },
+  RUNNING: { color: "var(--color-ok)", label: "Running", zh: "运行中" },
+  PAUSED_HOT: { color: "var(--color-hot)", label: "Paused · hot", zh: "已暂停 · 热" },
+  PAUSED_WARM: { color: "var(--color-warm)", label: "Paused · warm", zh: "已暂停 · 温" },
+  ARCHIVED_COLD: { color: "var(--color-cold)", label: "Archived · cold", zh: "已归档 · 冷" },
+  STOPPED: { color: "var(--color-idle)", label: "Stopped", zh: "已停止" },
+  RECYCLED: { color: "var(--color-idle)", label: "Recycled", zh: "已回收" },
+  FAILED: { color: "var(--color-danger)", label: "Failed", zh: "失败" },
+  PENDING: { color: "var(--color-transit)", label: "Pending", zh: "等待中" },
+  STARTING: { color: "var(--color-transit)", label: "Starting", zh: "启动中" },
+  RESUMING: { color: "var(--color-transit)", label: "Resuming", zh: "恢复中" },
+  PAUSING: { color: "var(--color-transit)", label: "Pausing", zh: "暂停中" },
+  STOPPING: { color: "var(--color-transit)", label: "Stopping", zh: "停止中" },
 };
 
 function meta(state: SandboxState): Meta {
-  return STATE_META[state] ?? { color: "var(--color-idle)", label: state.toLowerCase() };
+  return STATE_META[state] ?? { color: "var(--color-idle)", label: state.toLowerCase(), zh: state };
+}
+
+/** Translate a sandbox state's display label with a bound t(). */
+export function stateLabel(state: SandboxState, t: TFn): string {
+  const m = meta(state);
+  return t(m.label, m.zh);
+}
+
+/** Hook variant for components rendering state labels directly. */
+export function useStateLabel(): (state: SandboxState) => string {
+  const { t } = useI18n();
+  return (state: SandboxState) => stateLabel(state, t);
 }
 
 export function StatusDot(props: { state: SandboxState; size?: number }) {
@@ -40,6 +54,7 @@ export function StatusDot(props: { state: SandboxState; size?: number }) {
 }
 
 export function StateBadge(props: { state: SandboxState }) {
+  const { t } = useI18n();
   const m = meta(props.state);
   return (
     <span
@@ -51,7 +66,7 @@ export function StateBadge(props: { state: SandboxState }) {
       }}
     >
       <StatusDot state={props.state} size={6} />
-      {m.label}
+      {t(m.label, m.zh)}
     </span>
   );
 }

@@ -16,8 +16,10 @@ import {
   PageHeader,
   Skeleton,
 } from "../components/ui";
+import { useI18n } from "../lib/i18n";
 
 export function Nodes() {
+  const { t } = useI18n();
   const nodes = useNodes();
   const sandboxes = useSandboxes();
   const [selected, setSelected] = useState<string | null>(null);
@@ -25,7 +27,7 @@ export function Nodes() {
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Nodes" subtitle="Capacity and liveness across the cluster." />
+      <PageHeader title={t("Nodes", "节点")} subtitle={t("Capacity and liveness across the cluster.", "集群的容量与存活状态。")} />
 
       {nodes.isLoading && (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -42,10 +44,10 @@ export function Nodes() {
           ))}
         </div>
       )}
-      {nodes.data && nodes.data.length === 0 && <Empty>No nodes registered.</Empty>}
+      {nodes.data && nodes.data.length === 0 && <Empty>{t("No nodes registered.", "暂无已注册节点。")}</Empty>}
 
       <Drawer
-        title={node ? `Node ${node.id}` : "Node"}
+        title={node ? `${t("Node", "节点")} ${node.id}` : t("Node", "节点")}
         open={node !== null}
         onClose={() => setSelected(null)}
       >
@@ -56,6 +58,7 @@ export function Nodes() {
 }
 
 function NodeCard(props: { node: NodeView; onOpen: () => void }) {
+  const { t } = useI18n();
   const { node: n } = props;
   return (
     <button
@@ -70,15 +73,15 @@ function NodeCard(props: { node: NodeView; onOpen: () => void }) {
             style={{ background: n.state === "up" ? "var(--color-ok)" : "var(--color-danger)" }}
           />
           <span className={n.state === "up" ? "text-muted" : "text-danger"}>
-            {n.state} · {fmtAge(n.last_seen)}
+            {n.state === "up" ? t("up", "在线") : t("down", "离线")} · {fmtAge(n.last_seen)}
           </span>
         </span>
       </div>
       <div className="space-y-2.5">
-        <CapacityBar label="memory" used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />
-        <CapacityBar label="vcpus" used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />
+        <CapacityBar label={t("memory", "内存")} used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />
+        <CapacityBar label={t("vcpus", "vCPU")} used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />
         <div className="font-mono text-[11px] text-muted tabular-nums">
-          <span className="text-ink">{n.active_sandboxes}</span> active
+          <span className="text-ink">{n.active_sandboxes}</span> {t("active", "活跃")}
         </div>
       </div>
     </button>
@@ -86,15 +89,16 @@ function NodeCard(props: { node: NodeView; onOpen: () => void }) {
 }
 
 function NodeDetail(props: { node: NodeView; sandboxes: Sandbox[] }) {
+  const { t } = useI18n();
   const { node: n } = props;
   const here = props.sandboxes.filter((sb) => (sb.node_id || "local") === n.id);
   const meta: Array<[string, string]> = [
-    ["state", n.state],
-    ["address", n.addr || "—"],
-    ["cpu cores", n.cpu_cores ? String(n.cpu_cores) : "—"],
-    ["capacity", n.capacity_mib > 0 ? fmtMiB(n.capacity_mib) : "unlimited"],
-    ["used", fmtMiB(n.used_mib)],
-    ["last seen", `${fmtAge(n.last_seen)} ago`],
+    [t("state", "状态"), n.state === "up" ? t("up", "在线") : t("down", "离线")],
+    [t("address", "地址"), n.addr || "—"],
+    [t("cpu cores", "CPU 核数"), n.cpu_cores ? String(n.cpu_cores) : "—"],
+    [t("capacity", "容量"), n.capacity_mib > 0 ? fmtMiB(n.capacity_mib) : t("unlimited", "无限制")],
+    [t("used", "已用"), fmtMiB(n.used_mib)],
+    [t("last seen", "最后心跳"), `${fmtAge(n.last_seen)} ${t("ago", "前")}`],
   ];
   return (
     <div className="space-y-5">
@@ -107,15 +111,15 @@ function NodeDetail(props: { node: NodeView; sandboxes: Sandbox[] }) {
         ))}
       </dl>
       <div className="space-y-2.5">
-        <CapacityBar label="memory" used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />
-        <CapacityBar label="vcpus" used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />
+        <CapacityBar label={t("memory", "内存")} used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />
+        <CapacityBar label={t("vcpus", "vCPU")} used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />
       </div>
       <div>
         <h3 className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-          Sandboxes here ({here.length})
+          {t("Sandboxes here", "此节点上的沙箱")} ({here.length})
         </h3>
         {here.length === 0 ? (
-          <Empty>No sandboxes on this node.</Empty>
+          <Empty>{t("No sandboxes on this node.", "此节点上暂无沙箱。")}</Empty>
         ) : (
           <ul className="divide-y divide-hairline overflow-hidden rounded-md border border-hairline">
             {here.map((sb) => (

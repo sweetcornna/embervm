@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Component, useEffect, useRef, useState } from "react";
+import { useI18n } from "../lib/i18n";
 
 /* ── Error boundary ──────────────────────────────────────────────────────
    A render throw must degrade to a readable panel, never a white screen.
@@ -15,29 +16,39 @@ export class ErrorBoundary extends Component<
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <div className="grid min-h-64 place-items-center p-8">
-        <div className="max-w-md text-center">
-          <div className="mb-2 font-mono text-xs uppercase tracking-widest text-danger">
-            render error
-          </div>
-          <p className="mb-4 text-sm text-muted">
-            This view hit an unexpected error. The rest of the console is unaffected.
-          </p>
-          <pre className="mb-4 overflow-x-auto rounded border border-hairline bg-surface p-3 text-left font-mono text-xs text-faint">
-            {this.state.error.message}
-          </pre>
-          <Button
-            onClick={() => {
-              this.setState({ error: null });
-              this.props.onReset?.();
-            }}
-          >
-            Retry
-          </Button>
-        </div>
-      </div>
+      <ErrorPanel
+        message={this.state.error.message}
+        onRetry={() => {
+          this.setState({ error: null });
+          this.props.onReset?.();
+        }}
+      />
     );
   }
+}
+
+// Functional so it can translate (the class boundary above cannot use hooks).
+function ErrorPanel(props: { message: string; onRetry: () => void }) {
+  const { t } = useI18n();
+  return (
+    <div className="grid min-h-64 place-items-center p-8">
+      <div className="max-w-md text-center">
+        <div className="mb-2 font-mono text-xs uppercase tracking-widest text-danger">
+          {t("render error", "渲染错误")}
+        </div>
+        <p className="mb-4 text-sm text-muted">
+          {t(
+            "This view hit an unexpected error. The rest of the console is unaffected.",
+            "此视图遇到意外错误，控制台其余部分不受影响。",
+          )}
+        </p>
+        <pre className="mb-4 overflow-x-auto rounded border border-hairline bg-surface p-3 text-left font-mono text-xs text-faint">
+          {props.message}
+        </pre>
+        <Button onClick={props.onRetry}>{t("Retry", "重试")}</Button>
+      </div>
+    </div>
+  );
 }
 
 /* ── Page scaffold ───────────────────────────────────────────────────── */
@@ -171,6 +182,7 @@ export function Toggle(props: { checked: boolean; onChange: (v: boolean) => void
 
 /* ── Dialog ──────────────────────────────────────────────────────────── */
 export function Dialog(props: { title: string; open: boolean; onClose: () => void; children: ReactNode }) {
+  const { t } = useI18n();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const d = ref.current;
@@ -191,7 +203,7 @@ export function Dialog(props: { title: string; open: boolean; onClose: () => voi
         <h2 className="text-sm font-semibold tracking-tight">{props.title}</h2>
         <button
           onClick={props.onClose}
-          aria-label="Close"
+          aria-label={t("Close", "关闭")}
           className="rounded px-1.5 py-0.5 text-muted hover:bg-raised hover:text-ink"
         >
           ✕
@@ -214,6 +226,7 @@ export function ConfirmDialog(props: {
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const cancelRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (props.open) cancelRef.current?.focus();
@@ -229,7 +242,7 @@ export function ConfirmDialog(props: {
             onClick={props.onClose}
             className="inline-flex items-center rounded-md border border-border bg-raised/40 px-3 py-1.5 text-[13px] font-medium text-ink hover:bg-raised"
           >
-            Cancel
+            {t("Cancel", "取消")}
           </button>
           <Button kind="danger" onClick={props.onConfirm} busy={props.busy}>
             {props.confirmLabel}
@@ -261,6 +274,7 @@ export function Drawer(props: {
   onClose: () => void;
   children: ReactNode;
 }) {
+  const { t } = useI18n();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const d = ref.current;
@@ -282,7 +296,7 @@ export function Drawer(props: {
           <h2 className="min-w-0 truncate text-sm font-semibold tracking-tight">{props.title}</h2>
           <button
             onClick={props.onClose}
-            aria-label="Close"
+            aria-label={t("Close", "关闭")}
             className="rounded px-1.5 py-0.5 text-muted hover:bg-raised hover:text-ink"
           >
             ✕

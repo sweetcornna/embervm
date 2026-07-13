@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { ApiError, api, setToken } from "../api/client";
 import { Button, ErrorNote, Field, inputCls } from "../components/ui";
+import { useI18n } from "../lib/i18n";
 
 export function Login(props: { onDone: () => void }) {
+  const { t } = useI18n();
   const [token, setTok] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -18,7 +20,12 @@ export function Login(props: { onDone: () => void }) {
     } catch (err) {
       setError(
         err instanceof ApiError && err.status === 401
-          ? new Error("Token rejected. Tokens are defined in the apiserver's --tokens-file.")
+          ? new Error(
+              t(
+                "Token rejected. Tokens are defined in the apiserver's --tokens-file.",
+                "令牌被拒绝。令牌在 apiserver 的 --tokens-file 中定义。",
+              ),
+            )
           : err,
       );
     } finally {
@@ -38,15 +45,15 @@ export function Login(props: { onDone: () => void }) {
             <span className="size-2.5 rounded-full bg-[#fff3e0]" />
           </span>
           <div className="leading-tight">
-            <h1 className="text-lg font-semibold tracking-tight">EmberVM console</h1>
+            <h1 className="text-lg font-semibold tracking-tight">{t("EmberVM console", "EmberVM 控制台")}</h1>
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-faint">
-              sandbox cloud · operator
+              {t("sandbox cloud · operator", "沙箱云 · 操作员")}
             </p>
           </div>
         </div>
         <form onSubmit={connect} className="rounded-lg border border-border bg-surface p-6">
           <div className="space-y-4">
-            <Field label="API token" hint="Sent as a Bearer token to this host's /v0 API.">
+            <Field label={t("API token", "API 令牌")} hint={t("Sent as a Bearer token to this host's /v0 API.", "作为 Bearer 令牌发送到本机 /v0 API。")}>
               <input
                 className={inputCls}
                 type="password"
@@ -59,7 +66,7 @@ export function Login(props: { onDone: () => void }) {
             </Field>
             <ErrorNote error={error} />
             <Button kind="primary" type="submit" busy={busy} disabled={!token.trim()}>
-              Connect
+              {t("Connect", "连接")}
             </Button>
           </div>
         </form>

@@ -10,30 +10,32 @@ import { useSandboxAction, useSandboxEvents, useStorage, verbs } from "../../api
 import type { ExecResult } from "../../api/hooks";
 import type { Sandbox, SandboxState } from "../../api/types";
 import { Sparkline } from "../../components/charts";
-import { MemGauge, STATE_META } from "../../components/status";
+import { MemGauge, STATE_META, stateLabel } from "../../components/status";
 import { Button, Card, Empty, ErrorNote, Field, Mono, inputCls } from "../../components/ui";
 import type { HealthSample } from "../../lib/health";
 import { useSandboxHealth } from "../../lib/health";
+import { useI18n } from "../../lib/i18n";
 import { toast, toastError } from "../../lib/toast";
 
 export function OverviewTab(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-4">
       <Gauges sb={sb} />
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Resources">
+        <Card title={t("Resources", "资源")}>
           <ResizePanel sb={sb} />
         </Card>
-        <Card title="About">
+        <Card title={t("About", "关于")}>
           <MetaGrid sb={sb} />
         </Card>
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Storage">
+        <Card title={t("Storage", "存储")}>
           <StorageCard id={sb.id} />
         </Card>
-        <Card title="One-shot exec">
+        <Card title={t("One-shot exec", "一次性执行")}>
           <ExecPanel sb={sb} />
         </Card>
       </div>
@@ -46,22 +48,23 @@ export function OverviewTab(props: { sb: Sandbox }) {
 
 function RecentEvents(props: { sb: Sandbox }) {
   const { data } = useSandboxEvents(props.sb.id);
+  const { t } = useI18n();
   const events = (data?.events ?? []).slice(0, 5);
   return (
     <Card
-      title="Recent events"
+      title={t("Recent events", "近期事件")}
       actions={
         <Link
           to={`/sandboxes/${props.sb.id}/checkpoints`}
           className="text-xs text-accent hover:underline"
         >
-          full timeline →
+          {t("full timeline →", "完整时间线 →")}
         </Link>
       }
       pad={false}
     >
       {events.length === 0 ? (
-        <Empty>No transitions recorded yet.</Empty>
+        <Empty>{t("No transitions recorded yet.", "暂无状态转换记录。")}</Empty>
       ) : (
         <ul className="divide-y divide-hairline/60">
           {events.map((ev) => {
@@ -74,15 +77,15 @@ function RecentEvents(props: { sb: Sandbox }) {
                   style={{ background: meta?.color ?? "var(--color-idle)" }}
                 />
                 <span className="min-w-0 flex-1 text-[13px] text-ink">
-                  {meta?.label ?? ev.to_state}
+                  {stateLabel(ev.to_state as SandboxState, t)}
                   {ev.from_state && (
                     <span className="ml-2 font-mono text-[11px] text-faint">
-                      from {ev.from_state}
+                      {t("from", "来自")} {ev.from_state}
                     </span>
                   )}
                 </span>
                 <span className="shrink-0 font-mono text-[11px] text-faint">
-                  {fmtAge(ev.at)} ago
+                  {fmtAge(ev.at)} {t("ago", "前")}
                 </span>
               </li>
             );
@@ -110,6 +113,7 @@ function series(
 
 function Gauges(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const { samples, latest, unreachable } = useSandboxHealth(sb.id);
 
   const mem = useMemo(
@@ -126,8 +130,8 @@ function Gauges(props: { sb: Sandbox }) {
 
   if (sb.state !== "RUNNING")
     return (
-      <Card title="Live guest telemetry">
-        <Empty>Gauges resume with the sandbox — the guest is not running.</Empty>
+      <Card title={t("Live guest telemetry", "实时 guest 遥测")}>
+        <Empty>{t("Gauges resume with the sandbox — the guest is not running.", "仪表随沙箱恢复 —— guest 未在运行。")}</Empty>
       </Card>
     );
 
@@ -136,44 +140,44 @@ function Gauges(props: { sb: Sandbox }) {
   return (
     <div className="grid gap-4 md:grid-cols-3">
       <GaugeCard
-        title="Memory used"
+        title={t("Memory used", "内存占用")}
         value={h?.mem_total_kib ? fmtPct(1 - (h.mem_available_kib ?? 0) / h.mem_total_kib) : "—"}
         sub={
           h?.mem_total_kib
-            ? `${fmtKiB((h.mem_total_kib ?? 0) - (h.mem_available_kib ?? 0))} of ${fmtKiB(h.mem_total_kib)}`
+            ? `${fmtKiB((h.mem_total_kib ?? 0) - (h.mem_available_kib ?? 0))} ${t("of", "/")} ${fmtKiB(h.mem_total_kib)}`
             : unreachable
-              ? "guest unreachable"
-              : "waiting for first sample"
+              ? t("guest unreachable", "guest 不可达")
+              : t("waiting for first sample", "等待首个采样")
         }
       >
-        <Sparkline points={mem} label="memory used" format={fmtPct} yMin={0} yMax={1} />
+        <Sparkline points={mem} label={t("memory used", "内存占用")} format={fmtPct} yMin={0} yMax={1} />
       </GaugeCard>
       <GaugeCard
-        title="Memory pressure"
+        title={t("Memory pressure", "内存压力")}
         value={h ? (h.psi_mem_some10 ?? 0).toFixed(1) : "—"}
-        sub="PSI some avg10 — what autoscale watches"
+        sub={t("PSI some avg10 — what autoscale watches", "PSI some avg10 —— 自动伸缩的观测指标")}
       >
         <Sparkline
           points={psiMem}
-          label="memory pressure"
+          label={t("memory pressure", "内存压力")}
           format={(v) => v.toFixed(1)}
           yMin={0}
           yMax={psiMax}
-          trendWords={["easing", "steady", "climbing"]}
+          trendWords={[t("easing", "回落"), t("steady", "平稳"), t("climbing", "攀升")]}
         />
       </GaugeCard>
       <GaugeCard
-        title="CPU pressure"
+        title={t("CPU pressure", "CPU 压力")}
         value={h ? (h.psi_cpu_some10 ?? 0).toFixed(1) : "—"}
-        sub={h?.resumes !== undefined ? `${h.resumes} resumes · seq ${h.seq}` : undefined}
+        sub={h?.resumes !== undefined ? `${h.resumes} ${t("resumes", "恢复次数")} · seq ${h.seq}` : undefined}
       >
         <Sparkline
           points={psiCPU}
-          label="cpu pressure"
+          label={t("cpu pressure", "CPU 压力")}
           format={(v) => v.toFixed(1)}
           yMin={0}
           yMax={psiMax}
-          trendWords={["easing", "steady", "climbing"]}
+          trendWords={[t("easing", "回落"), t("steady", "平稳"), t("climbing", "攀升")]}
         />
       </GaugeCard>
     </div>
@@ -204,6 +208,7 @@ function GaugeCard(props: {
 
 function ResizePanel(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const base = sb.base_memory_mib || sb.memory_mib;
   const maxMem = sb.max_memory_mib ?? 0;
   const maxCPU = sb.max_vcpus ?? 0;
@@ -219,16 +224,17 @@ function ResizePanel(props: { sb: Sandbox }) {
     {
       sandboxId: sb.id,
       optimistic: () => ({ memory_mib: mem, vcpus: cpu }),
-      onSuccess: (out) => toast.success("Resized", `${fmtMiB(out.memory_mib)} · ${out.vcpus} vCPU`),
-      onError: toastError("Resize failed"),
+      onSuccess: (out) => toast.success(t("Resized", "已调整"), `${fmtMiB(out.memory_mib)} · ${out.vcpus} vCPU`),
+      onError: toastError(t("Resize failed", "调整失败")),
     },
   );
 
   if (!resizable)
     return (
       <p className="text-[13px] text-faint">
-        Fixed geometry — create with <Mono>max_memory_mib</Mono> / <Mono>max_vcpus</Mono> to enable
-        runtime resize.
+        {t("Fixed geometry — create with ", "固定规格 —— 创建时指定 ")}
+        <Mono>max_memory_mib</Mono> / <Mono>max_vcpus</Mono>
+        {t(" to enable runtime resize.", " 以启用运行时调整。")}
       </p>
     );
 
@@ -244,7 +250,7 @@ function ResizePanel(props: { sb: Sandbox }) {
       />
       <div className="grid gap-4 sm:grid-cols-2">
         {maxMem > base && (
-          <Field label={`Memory · ${fmtMiB(base)} – ${fmtMiB(maxMem)}`}>
+          <Field label={`${t("Memory", "内存")} · ${fmtMiB(base)} – ${fmtMiB(maxMem)}`}>
             <div className="flex items-center gap-3">
               <input
                 type="range"
@@ -279,14 +285,19 @@ function ResizePanel(props: { sb: Sandbox }) {
           busy={resize.isPending}
           disabled={!dirty || sb.state !== "RUNNING"}
         >
-          Apply resize
+          {t("Apply resize", "应用调整")}
         </Button>
         {sb.autoscale && (
           <span className="font-mono text-xs text-transit">
-            autoscale on — the engine also moves these on guest pressure
+            {t(
+              "autoscale on — the engine also moves these on guest pressure",
+              "自动伸缩已开启 —— 引擎也会在 guest 压力下自动调整",
+            )}
           </span>
         )}
-        {sb.state !== "RUNNING" && <span className="text-xs text-faint">resize needs RUNNING</span>}
+        {sb.state !== "RUNNING" && (
+          <span className="text-xs text-faint">{t("resize needs RUNNING", "调整需要 RUNNING")}</span>
+        )}
       </div>
       <ErrorNote error={resize.error} />
     </div>
@@ -297,16 +308,17 @@ function ResizePanel(props: { sb: Sandbox }) {
 
 function MetaGrid(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const rows: Array<[string, React.ReactNode]> = [
-    ["node", sb.node_id || "—"],
-    ["template", sb.template_id.slice(0, 8)],
-    ["disk", `${sb.data_disk_gib} GiB`],
+    [t("node", "节点"), sb.node_id || "—"],
+    [t("template", "模板"), sb.template_id.slice(0, 8)],
+    [t("disk", "磁盘"), `${sb.data_disk_gib} GiB`],
     ["vcpus", `${sb.vcpus}${sb.max_vcpus ? ` / ${sb.max_vcpus}` : ""}`],
-    ["age", `${fmtAge(sb.created_at)}`],
-    ["updated", `${fmtAge(sb.updated_at)} ago`],
+    [t("age", "创建时长"), `${fmtAge(sb.created_at)}`],
+    [t("updated", "更新于"), `${fmtAge(sb.updated_at)} ${t("ago", "前")}`],
   ];
-  if (sb.paused_at) rows.push(["paused", `${fmtAge(sb.paused_at)} ago`]);
-  if (sb.autoscale) rows.push(["autoscale", "on"]);
+  if (sb.paused_at) rows.push([t("paused", "暂停于"), `${fmtAge(sb.paused_at)} ${t("ago", "前")}`]);
+  if (sb.autoscale) rows.push([t("autoscale", "自动伸缩"), t("on", "开启")]);
   return (
     <div>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3">
@@ -319,7 +331,7 @@ function MetaGrid(props: { sb: Sandbox }) {
       </dl>
       {sb.forked_from && (
         <p className="mt-3 text-[12px] text-muted">
-          forked from{" "}
+          {t("forked from", "派生自")}{" "}
           <Link to={`/sandboxes/${sb.parent_id ?? ""}`} className="font-mono text-accent hover:underline">
             {sb.forked_from}
           </Link>
@@ -333,8 +345,9 @@ function MetaGrid(props: { sb: Sandbox }) {
 /* ── Storage (ported) ────────────────────────────────────────────────── */
 
 function StorageCard(props: { id: string }) {
+  const { t } = useI18n();
   const { data } = useStorage(props.id);
-  if (!data) return <Empty>Loading…</Empty>;
+  if (!data) return <Empty>{t("Loading…", "加载中…")}</Empty>;
   const rows: Array<[string, string]> = [
     ["tier", data.tier],
     ["logical", fmtBytes(data.logical_bytes)],
@@ -359,6 +372,7 @@ function StorageCard(props: { id: string }) {
 
 function ExecPanel(props: { sb: Sandbox }) {
   const { sb } = props;
+  const { t } = useI18n();
   const [cmdline, setCmdline] = useState("");
   const [result, setResult] = useState<ExecResult | null>(null);
   const exec = useMutation({
@@ -382,14 +396,17 @@ function ExecPanel(props: { sb: Sandbox }) {
           value={cmdline}
           onChange={(e) => setCmdline(e.target.value)}
           placeholder="uname -a"
-          aria-label="Command"
+          aria-label={t("Command", "命令")}
         />
         <Button kind="primary" type="submit" busy={exec.isPending} disabled={sb.state !== "RUNNING"}>
-          Run
+          {t("Run", "运行")}
         </Button>
       </form>
       <p className="text-[11px] text-faint">
-        Buffered request/response — for a live shell use the Terminal tab.
+        {t(
+          "Buffered request/response — for a live shell use the Terminal tab.",
+          "缓冲式请求/响应 —— 需要交互式 shell 请用「终端」标签。",
+        )}
       </p>
       <ErrorNote error={exec.error} />
       {result && (
@@ -401,11 +418,11 @@ function ExecPanel(props: { sb: Sandbox }) {
             </span>
             {" · "}
             {result.duration_ms}ms
-            {result.timed_out && <span className="text-danger"> · timed out</span>}
-            {result.truncated && <span className="text-transit"> · truncated</span>}
+            {result.timed_out && <span className="text-danger">{t(" · timed out", " · 已超时")}</span>}
+            {result.truncated && <span className="text-transit">{t(" · truncated", " · 已截断")}</span>}
           </div>
           <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-xs text-ink">
-            {decodeBytes(result.stdout) || <span className="text-faint">(no stdout)</span>}
+            {decodeBytes(result.stdout) || <span className="text-faint">{t("(no stdout)", "（无标准输出）")}</span>}
           </pre>
           {result.stderr && (
             <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-xs text-[#f3a6a2]">

@@ -3,6 +3,7 @@
 
 import { Tabs as RadixTabs } from "radix-ui";
 import type { ReactNode } from "react";
+import { useI18n } from "../lib/i18n";
 
 export interface TabDef {
   value: string;
@@ -17,21 +18,22 @@ export function TabBar(props: {
   onChange: (value: string) => void;
   right?: ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <RadixTabs.Root value={props.value} onValueChange={props.onChange}>
       <RadixTabs.List
         className="flex items-center gap-0.5 border-b border-hairline px-2"
-        aria-label="Workspace sections"
+        aria-label={t("Workspace sections", "工作区分区")}
       >
-        {props.tabs.map((t) => (
+        {props.tabs.map((tab) => (
           <RadixTabs.Trigger
-            key={t.value}
-            value={t.value}
-            disabled={t.disabled}
+            key={tab.value}
+            value={tab.value}
+            disabled={tab.disabled}
             className="relative -mb-px inline-flex items-center gap-1.5 rounded-t-md border-b-2 border-transparent px-3 py-2 text-[13px] font-medium text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 data-[state=active]:border-accent data-[state=active]:text-ink"
           >
-            {t.icon}
-            {t.label}
+            {tab.icon}
+            {tab.label}
           </RadixTabs.Trigger>
         ))}
         {props.right && <div className="ml-auto pr-1">{props.right}</div>}

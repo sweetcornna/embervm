@@ -5,6 +5,7 @@
 import { useRef, useState } from "react";
 import { useDirectory } from "../api/hooks";
 import type { DirEntry } from "../api/types";
+import { useI18n } from "../lib/i18n";
 import { joinPath } from "../lib/files";
 import {
   IconChevronDown,
@@ -20,6 +21,7 @@ export function FileTree(props: {
   selected?: string;
   onOpenFile: (path: string) => void;
 }) {
+  const { t } = useI18n();
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Up/Down move between the currently visible rows.
@@ -38,7 +40,7 @@ export function FileTree(props: {
     <div
       ref={rootRef}
       role="tree"
-      aria-label="Guest files"
+      aria-label={t("Guest files", "guest 文件")}
       onKeyDown={onKeyDown}
       className="h-full overflow-auto py-1 font-mono text-[12.5px]"
     >
@@ -69,6 +71,7 @@ function DirNode(props: {
   name?: string;
   initiallyOpen?: boolean;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(props.initiallyOpen ?? false);
   const { data, isLoading, error } = useDirectory(props.sandboxId, props.path, open);
   const entries = data?.entries ?? [];
@@ -137,7 +140,7 @@ function DirNode(props: {
               style={{ paddingLeft: `${(props.depth + 1) * 14 + 8}px` }}
               className="py-1 text-[11px] text-faint"
             >
-              … listing truncated at 10 000 entries
+              {t("… listing truncated at 10 000 entries", "… 列表在 10000 条处截断")}
             </div>
           )}
           {data && entries.length === 0 && (
@@ -145,7 +148,7 @@ function DirNode(props: {
               style={{ paddingLeft: `${(props.depth + 1) * 14 + 8}px` }}
               className="py-1 text-[11px] text-faint"
             >
-              empty
+              {t("empty", "空")}
             </div>
           )}
         </div>
