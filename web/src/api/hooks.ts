@@ -11,6 +11,7 @@ import type {
   NodeView,
   Sandbox,
   StorageReport,
+  StorageReportAll,
   Template,
 } from "./types";
 
@@ -63,7 +64,8 @@ export function useStorage(id: string) {
 export function useStorageReport() {
   return useQuery({
     queryKey: ["storage-report"],
-    queryFn: () => api<StorageReport[]>("GET", "/storage-report"),
+    queryFn: () => api<StorageReportAll>("GET", "/storage-report"),
+    refetchInterval: 10000,
   });
 }
 

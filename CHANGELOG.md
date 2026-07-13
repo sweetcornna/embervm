@@ -10,6 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ### Fixed
 
+- **Console blank-screen on Storage (and future render throws)** — the
+  storage-report endpoint returns an object (`{sandboxes, total_*}`), but
+  the console typed it as an array and called `.reduce`, throwing and —
+  with no error boundary — white-screening the whole app when the Storage
+  tab was opened. Fixed the type/usage to consume the server's pre-summed
+  totals, and added a route-keyed `ErrorBoundary` so any future render
+  error degrades to a readable panel instead of a blank page.
+
 - **uffd zero-fill truncation** — `zeroRange` treated the kernel stopping a
   multi-page `UFFDIO_ZEROPAGE` at an already-mapped page as "span done"; at
   the M6 coalesced zero-run sizes that left unfilled tails marked populated,
@@ -36,8 +44,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   slider, checkpoints/fork/rollback, in-guest exec, storage costs),
   templates and storage-report pages. Bearer-token login; fonts bundled
   (works air-gapped); dark operator theme. `GET /v0/nodes` added for the
-  fleet view (nodes + live usage + active counts). Built assets are
-  committed so `go build` alone ships a working console; `make web`
+  fleet view (nodes + live usage + active counts). Enterprise visual
+  language — neutral slate surfaces, Inter, a single amber brand accent,
+  flat semantic status badges, KPI stat tiles, dense tables. Built assets
+  are committed so `go build` alone ships a working console; `make web`
   rebuilds them.
 
 ## [v0.6.0-m6] — 2026-07-10 — Runtime elasticity (M6) — **v0.3**

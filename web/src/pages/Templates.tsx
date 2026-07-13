@@ -2,12 +2,12 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { fmtAge } from "../api/client";
 import { useTemplates, verbs } from "../api/hooks";
-import { Button, Card, Empty, ErrorNote, Field, Mono, inputCls } from "../components/ui";
+import { Button, Card, Empty, ErrorNote, Field, Mono, PageHeader, Table, inputCls } from "../components/ui";
 
 const TSTATE: Record<string, string> = {
-  READY: "var(--color-ember)",
+  READY: "var(--color-ok)",
   BUILDING: "var(--color-transit)",
-  ERROR: "var(--color-alarm)",
+  ERROR: "var(--color-danger)",
 };
 
 export function Templates() {
@@ -30,13 +30,11 @@ export function Templates() {
   });
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4">
-      <header>
-        <h1 className="font-display text-2xl font-bold tracking-wide">Templates</h1>
-        <p className="mt-1 text-sm text-muted">
-          A template turns a container image into a bootable microVM root; sandboxes clone it in O(1).
-        </p>
-      </header>
+    <div className="space-y-5">
+      <PageHeader
+        title="Templates"
+        subtitle="A template turns a container image into a bootable microVM root; sandboxes clone it in O(1)."
+      />
 
       <Card title="Build a template">
         <form
@@ -51,7 +49,7 @@ export function Templates() {
               <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="web" />
             </Field>
           </div>
-          <div className="grow">
+          <div className="min-w-52 grow">
             <Field label="Container image">
               <input
                 className={inputCls}
@@ -65,56 +63,54 @@ export function Templates() {
             Build
           </Button>
         </form>
-        <div className="mt-2">
-          <ErrorNote error={build.error ?? del.error} />
-        </div>
+        {(build.error || del.error) && (
+          <div className="mt-3">
+            <ErrorNote error={build.error ?? del.error} />
+          </div>
+        )}
       </Card>
 
-      <div className="overflow-x-auto rounded-md border border-border bg-surface">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-hairline text-left font-mono text-[11px] uppercase tracking-wider text-muted">
-              <th className="px-4 py-2.5 font-medium">Name</th>
-              <th className="px-4 py-2.5 font-medium">Image</th>
-              <th className="px-4 py-2.5 font-medium">State</th>
-              <th className="px-4 py-2.5 font-medium">Age</th>
-              <th className="px-4 py-2.5" />
-            </tr>
-          </thead>
-          <tbody>
-            {(data ?? []).map((t) => (
-              <tr key={t.id} className="border-b border-hairline last:border-0">
-                <td className="px-4 py-2.5 font-medium">{t.name}</td>
-                <td className="px-4 py-2.5">
-                  <Mono className="text-muted">{t.image}</Mono>
-                </td>
-                <td className="px-4 py-2.5">
-                  <span className="font-mono text-xs" style={{ color: TSTATE[t.state] ?? "var(--color-ash)" }}>
-                    {t.state.toLowerCase()}
-                  </span>
-                  {t.error && <span className="ml-2 font-mono text-[11px] text-alarm">{t.error}</span>}
-                </td>
-                <td className="px-4 py-2.5">
-                  <Mono className="text-muted">{fmtAge(t.created_at)}</Mono>
-                </td>
-                <td className="px-4 py-2.5 text-right">
-                  <Button
-                    kind="danger"
-                    onClick={() => {
-                      if (window.confirm(`Delete template "${t.name}"?`)) del.mutate(t.id);
-                    }}
-                  >
-                    Delete
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!isLoading && (data ?? []).length === 0 && (
-          <Empty>No templates. Build one from a container image above.</Empty>
-        )}
-      </div>
+      <Table head={["Name", "Image", "State", "Age", ""]}>
+        {(data ?? []).map((t) => (
+          <tr key={t.id} className="border-b border-hairline last:border-0 hover:bg-raised/40">
+            <td className="px-4 py-2.5 font-medium text-ink">{t.name}</td>
+            <td className="px-4 py-2.5">
+              <Mono className="text-muted">{t.image}</Mono>
+            </td>
+            <td className="px-4 py-2.5">
+              <span
+                className="inline-flex items-center gap-1.5 font-mono text-xs"
+                style={{ color: TSTATE[t.state] ?? "var(--color-idle)" }}
+              >
+                <span
+                  className="inline-block size-1.5 rounded-full"
+                  style={{ background: TSTATE[t.state] ?? "var(--color-idle)" }}
+                />
+                {t.state.toLowerCase()}
+              </span>
+              {t.error && <span className="ml-2 font-mono text-[11px] text-danger">{t.error}</span>}
+            </td>
+            <td className="px-4 py-2.5">
+              <Mono className="text-muted tabular-nums">{fmtAge(t.created_at)}</Mono>
+            </td>
+            <td className="px-4 py-2.5 text-right">
+              <Button
+                size="sm"
+                kind="danger"
+                onClick={() => {
+                  if (window.confirm(`Delete template "${t.name}"?`)) del.mutate(t.id);
+                }}
+              >
+                Delete
+              </Button>
+            </td>
+          </tr>
+        ))}
+      </Table>
+      {!isLoading && (data ?? []).length === 0 && (
+        <Empty>No templates. Build one from a container image above.</Empty>
+      )}
+      {isLoading && <Empty>Loading…</Empty>}
     </div>
   );
 }

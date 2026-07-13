@@ -18,7 +18,7 @@ export function Login(props: { onDone: () => void }) {
     } catch (err) {
       setError(
         err instanceof ApiError && err.status === 401
-          ? new Error("That token was rejected. Tokens live in the apiserver's --tokens-file.")
+          ? new Error("Token rejected. Tokens are defined in the apiserver's --tokens-file.")
           : err,
       );
     } finally {
@@ -28,34 +28,42 @@ export function Login(props: { onDone: () => void }) {
 
   return (
     <div className="grid min-h-dvh place-items-center px-4">
-      <form onSubmit={connect} className="w-full max-w-sm rounded-lg border border-border bg-surface p-6">
+      <div className="w-full max-w-sm">
         <div className="mb-6 flex items-center gap-3">
-          <span className="ember-live inline-block size-3 rounded-full bg-ember" aria-hidden />
-          <div>
-            <h1 className="font-display text-xl font-bold tracking-wide">EmberVM</h1>
-            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-faint">
-              the sandbox cloud that never goes cold
+          <span
+            aria-hidden
+            className="inline-grid size-8 place-items-center rounded-lg"
+            style={{ background: "radial-gradient(circle at 50% 45%, var(--color-accent), #7a3d0e)" }}
+          >
+            <span className="size-2.5 rounded-full bg-[#fff3e0]" />
+          </span>
+          <div className="leading-tight">
+            <h1 className="text-lg font-semibold tracking-tight">EmberVM console</h1>
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-faint">
+              sandbox cloud · operator
             </p>
           </div>
         </div>
-        <div className="space-y-4">
-          <Field label="API token" hint="Sent as a Bearer token to this host's /v0 API.">
-            <input
-              className={inputCls}
-              type="password"
-              autoFocus
-              autoComplete="off"
-              value={token}
-              onChange={(e) => setTok(e.target.value)}
-              placeholder="dev-token"
-            />
-          </Field>
-          <ErrorNote error={error} />
-          <Button kind="primary" type="submit" busy={busy} disabled={!token.trim()}>
-            Connect
-          </Button>
-        </div>
-      </form>
+        <form onSubmit={connect} className="rounded-lg border border-border bg-surface p-6">
+          <div className="space-y-4">
+            <Field label="API token" hint="Sent as a Bearer token to this host's /v0 API.">
+              <input
+                className={inputCls}
+                type="password"
+                autoFocus
+                autoComplete="off"
+                value={token}
+                onChange={(e) => setTok(e.target.value)}
+                placeholder="dev-token"
+              />
+            </Field>
+            <ErrorNote error={error} />
+            <Button kind="primary" type="submit" busy={busy} disabled={!token.trim()}>
+              Connect
+            </Button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

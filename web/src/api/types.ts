@@ -98,3 +98,13 @@ export interface StorageReport {
   artifact_bytes?: number;
   layers: number;
 }
+
+// The aggregate report is an object with pre-summed totals, NOT a bare
+// array — the server does the reduction (storageReportAll).
+export interface StorageReportAll {
+  sandboxes: StorageReport[];
+  total_logical_bytes: number;
+  total_stored_bytes: number;
+  total_artifact_bytes: number;
+  total_chunks: number;
+}

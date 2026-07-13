@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { decodeBytes, fmtAge, fmtBytes, fmtMiB } from "../api/client";
 import { useCheckpoints, useSandbox, useSandboxAction, useStorage, verbs } from "../api/hooks";
 import type { ExecResponse, Sandbox } from "../api/types";
-import { MemGauge, StateMark } from "../components/ember";
+import { MemGauge, StateBadge } from "../components/status";
 import { Button, Card, Empty, ErrorNote, Field, Mono, inputCls } from "../components/ui";
 
 function Lifecycle(props: { sb: Sandbox }) {
@@ -22,7 +22,7 @@ function Lifecycle(props: { sb: Sandbox }) {
   const paused = sb.state.startsWith("PAUSED") || sb.state === "ARCHIVED_COLD" || sb.state === "FAILED";
   const err = pause.error ?? resume.error ?? snapshot.error ?? migrate.error ?? kill.error;
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => pause.mutate()} busy={pause.isPending} disabled={!running}>
           Pause
@@ -42,10 +42,11 @@ function Lifecycle(props: { sb: Sandbox }) {
           onClick={() => migrate.mutate()}
           busy={migrate.isPending}
           disabled={!running && sb.state !== "PAUSED_HOT"}
-          title="Move to another node (running: ~seconds pause; paused: pointer move)"
+          title="Move to another node"
         >
           Migrate
         </Button>
+        <div className="grow" />
         <Button
           kind="danger"
           onClick={() => {
@@ -79,7 +80,7 @@ function ResizePanel(props: { sb: Sandbox }) {
 
   if (!resizable)
     return (
-      <p className="text-sm text-faint">
+      <p className="text-[13px] text-faint">
         Fixed geometry — create with <Mono>max_memory_mib</Mono> / <Mono>max_vcpus</Mono> to enable
         runtime resize.
       </p>
@@ -106,9 +107,9 @@ function ResizePanel(props: { sb: Sandbox }) {
                 step={128}
                 value={mem}
                 onChange={(e) => setMem(Number(e.target.value))}
-                className="w-full accent-(--color-ember)"
+                className="w-full accent-(--color-accent)"
               />
-              <Mono className="w-20 text-right">{fmtMiB(mem)}</Mono>
+              <Mono className="w-20 text-right tabular-nums">{fmtMiB(mem)}</Mono>
             </div>
           </Field>
         )}
@@ -125,7 +126,7 @@ function ResizePanel(props: { sb: Sandbox }) {
           </Field>
         )}
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button
           kind="primary"
           onClick={() => resize.mutate()}
@@ -186,12 +187,8 @@ function Checkpoints(props: { sb: Sandbox }) {
             />
           </Field>
         </div>
-        <Button
-          onClick={() => checkpoint.mutate()}
-          busy={checkpoint.isPending}
-          disabled={sb.state !== "RUNNING"}
-        >
-          Checkpoint now
+        <Button onClick={() => checkpoint.mutate()} busy={checkpoint.isPending} disabled={sb.state !== "RUNNING"}>
+          Checkpoint
         </Button>
         <Button onClick={() => fork.mutate(undefined)} busy={fork.isPending} title="Checkpoint, then branch">
           Fork now
@@ -201,7 +198,7 @@ function Checkpoints(props: { sb: Sandbox }) {
       {isLoading && <Empty>Loading…</Empty>}
       {data && data.length === 0 && <Empty>No checkpoints yet — every one is a fork/rollback anchor.</Empty>}
       {data && data.length > 0 && (
-        <ul className="divide-y divide-hairline rounded border border-hairline">
+        <ul className="divide-y divide-hairline overflow-hidden rounded-md border border-hairline">
           {data.map((cp) => (
             <li key={cp.tag} className="flex items-center justify-between gap-3 px-3 py-2">
               <div>
@@ -211,10 +208,11 @@ function Checkpoints(props: { sb: Sandbox }) {
                 </span>
               </div>
               <div className="flex gap-2">
-                <Button onClick={() => fork.mutate(cp.tag)} busy={fork.isPending}>
+                <Button size="sm" onClick={() => fork.mutate(cp.tag)} busy={fork.isPending}>
                   Fork
                 </Button>
                 <Button
+                  size="sm"
                   kind="danger"
                   onClick={() => {
                     if (window.confirm(`Roll back to "${cp.tag}"? Everything after it is discarded.`))
@@ -267,19 +265,20 @@ function ExecPanel(props: { sb: Sandbox }) {
       </form>
       <ErrorNote error={exec.error} />
       {result && (
-        <div className="rounded border border-hairline bg-bg p-3">
-          <div className="mb-2 font-mono text-[11px] text-muted">
-            exit <span className={result.exit_code === 0 ? "text-ember" : "text-alarm"}>{result.exit_code}</span>
+        <div className="rounded-md border border-hairline bg-bg p-3">
+          <div className="mb-2 font-mono text-[11px] text-muted tabular-nums">
+            exit{" "}
+            <span className={result.exit_code === 0 ? "text-ok" : "text-danger"}>{result.exit_code}</span>
             {" · "}
             {result.duration_ms}ms
-            {result.timed_out && <span className="text-alarm"> · timed out</span>}
+            {result.timed_out && <span className="text-danger"> · timed out</span>}
             {result.truncated && <span className="text-transit"> · truncated</span>}
           </div>
           <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-xs text-ink">
             {decodeBytes(result.stdout) || <span className="text-faint">(no stdout)</span>}
           </pre>
           {result.stderr && (
-            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-xs text-[#f1a3a6]">
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-xs text-[#f3a6a2]">
               {decodeBytes(result.stderr)}
             </pre>
           )}
@@ -301,14 +300,22 @@ function StorageCard(props: { id: string }) {
     ["layers", String(data.layers)],
   ];
   return (
-    <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3">
       {rows.map(([k, v]) => (
         <div key={k}>
-          <dt className="font-mono text-[11px] uppercase tracking-wider text-muted">{k}</dt>
-          <dd className="font-mono text-sm text-ink">{v}</dd>
+          <dt className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">{k}</dt>
+          <dd className="mt-0.5 font-mono text-[13px] text-ink">{v}</dd>
         </div>
       ))}
     </dl>
+  );
+}
+
+function Meta(props: { label: string; children: React.ReactNode }) {
+  return (
+    <span className="font-mono text-[11px] text-muted">
+      {props.label} <span className="text-ink">{props.children}</span>
+    </span>
   );
 }
 
@@ -319,34 +326,35 @@ export function SandboxDetail() {
   if (isLoading) return <Empty>Loading…</Empty>;
   if (error || !sb)
     return (
-      <div className="mx-auto max-w-3xl space-y-3">
+      <div className="space-y-3">
         <ErrorNote error={error ?? new Error("sandbox not found")} />
-        <Link to="/sandboxes" className="text-sm text-ember hover:underline">
+        <Link to="/sandboxes" className="text-[13px] text-accent hover:underline">
           ← back to sandboxes
         </Link>
       </div>
     );
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4">
-      <header className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <h1 className="font-display text-xl font-bold tracking-wide">
-          <Link to="/sandboxes" className="text-faint hover:text-muted">
-            sandboxes /
-          </Link>{" "}
-          <Mono className="text-lg">{sb.id.slice(0, 8)}</Mono>
-        </h1>
-        <StateMark state={sb.state} />
-        {sb.error && <span className="font-mono text-xs text-alarm">{sb.error}</span>}
-      </header>
-
-      <div className="flex flex-wrap gap-x-6 gap-y-1 font-mono text-xs text-muted">
-        <span>node <span className="text-ink">{sb.node_id || "—"}</span></span>
-        <span>template <span className="text-ink">{sb.template_id.slice(0, 8)}</span></span>
-        <span>disk <span className="text-ink">{sb.data_disk_gib} GiB</span></span>
-        <span>age <span className="text-ink">{fmtAge(sb.created_at)}</span></span>
-        {sb.forked_from && <span>forked from <span className="text-ink">{sb.forked_from}</span></span>}
-        {sb.autoscale && <span className="text-transit">autoscale</span>}
+    <div className="space-y-5">
+      <div>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-xl font-semibold tracking-tight">
+            <Link to="/sandboxes" className="text-faint hover:text-muted">
+              sandboxes /
+            </Link>{" "}
+            <Mono className="text-lg">{sb.id.slice(0, 8)}</Mono>
+          </h1>
+          <StateBadge state={sb.state} />
+          {sb.error && <span className="font-mono text-xs text-danger">{sb.error}</span>}
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1">
+          <Meta label="node">{sb.node_id || "—"}</Meta>
+          <Meta label="template">{sb.template_id.slice(0, 8)}</Meta>
+          <Meta label="disk">{sb.data_disk_gib} GiB</Meta>
+          <Meta label="age">{fmtAge(sb.created_at)}</Meta>
+          {sb.forked_from && <Meta label="forked from">{sb.forked_from}</Meta>}
+          {sb.autoscale && <span className="font-mono text-[11px] text-transit">autoscale</span>}
+        </div>
       </div>
 
       <Card title="Lifecycle">

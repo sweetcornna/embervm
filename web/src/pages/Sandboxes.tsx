@@ -4,8 +4,19 @@ import { Link, useNavigate } from "react-router-dom";
 import { fmtAge } from "../api/client";
 import { useSandboxes, useTemplates, verbs } from "../api/hooks";
 import type { CreateSandboxRequest } from "../api/types";
-import { MemGauge, StateMark } from "../components/ember";
-import { Button, Dialog, Empty, ErrorNote, Field, Mono, inputCls } from "../components/ui";
+import { MemGauge, StateBadge } from "../components/status";
+import {
+  Button,
+  Dialog,
+  Empty,
+  ErrorNote,
+  Field,
+  Mono,
+  PageHeader,
+  Table,
+  Toggle,
+  inputCls,
+} from "../components/ui";
 
 function CreateDialog(props: { open: boolean; onClose: () => void }) {
   const templates = useTemplates();
@@ -103,46 +114,44 @@ function CreateDialog(props: { open: boolean; onClose: () => void }) {
           </Field>
         </div>
 
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
+        <div className="rounded-md border border-hairline bg-bg p-3">
+          <Toggle
             checked={form.resizable}
-            onChange={(e) => set("resizable", e.target.checked)}
+            onChange={(v) => set("resizable", v)}
+            label="Resizable at runtime"
           />
-          Resizable at runtime (attaches a virtio-mem region and a CPU ceiling)
-        </label>
-        {form.resizable && (
-          <div className="grid grid-cols-2 gap-3 rounded border border-hairline bg-bg p-3">
-            <Field label="Max memory MiB" hint="Rounded up to 128 MiB slots.">
-              <input
-                className={inputCls}
-                type="number"
-                min={form.memory_mib}
-                step={128}
-                value={form.max_memory_mib}
-                onChange={(e) => set("max_memory_mib", Number(e.target.value))}
-              />
-            </Field>
-            <Field label="Max vCPUs">
-              <input
-                className={inputCls}
-                type="number"
-                min={form.vcpus}
-                max={64}
-                value={form.max_vcpus}
-                onChange={(e) => set("max_vcpus", Number(e.target.value))}
-              />
-            </Field>
-            <label className="col-span-2 flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={form.autoscale}
-                onChange={(e) => set("autoscale", e.target.checked)}
-              />
-              Autoscale on guest pressure (grows under load, shrinks back when idle)
-            </label>
-          </div>
-        )}
+          {form.resizable && (
+            <div className="mt-3 grid grid-cols-2 gap-3 border-t border-hairline pt-3">
+              <Field label="Max memory MiB" hint="Rounded up to 128 MiB slots.">
+                <input
+                  className={inputCls}
+                  type="number"
+                  min={form.memory_mib}
+                  step={128}
+                  value={form.max_memory_mib}
+                  onChange={(e) => set("max_memory_mib", Number(e.target.value))}
+                />
+              </Field>
+              <Field label="Max vCPUs">
+                <input
+                  className={inputCls}
+                  type="number"
+                  min={form.vcpus}
+                  max={64}
+                  value={form.max_vcpus}
+                  onChange={(e) => set("max_vcpus", Number(e.target.value))}
+                />
+              </Field>
+              <div className="col-span-2">
+                <Toggle
+                  checked={form.autoscale}
+                  onChange={(v) => set("autoscale", v)}
+                  label="Autoscale on guest pressure"
+                />
+              </div>
+            </div>
+          )}
+        </div>
 
         <Field label="Egress">
           <select
@@ -173,70 +182,59 @@ export function Sandboxes() {
   const list = data ?? [];
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4">
-      <header className="flex items-center justify-between">
-        <h1 className="font-display text-2xl font-bold tracking-wide">Sandboxes</h1>
-        <Button kind="primary" onClick={() => setCreating(true)}>
-          New sandbox
-        </Button>
-      </header>
+    <div className="space-y-5">
+      <PageHeader
+        title="Sandboxes"
+        subtitle={list.length > 0 ? `${list.length} total` : undefined}
+        actions={
+          <Button kind="primary" onClick={() => setCreating(true)}>
+            New sandbox
+          </Button>
+        }
+      />
 
-      <div className="overflow-x-auto rounded-md border border-border bg-surface">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-hairline text-left font-mono text-[11px] uppercase tracking-wider text-muted">
-              <th className="px-4 py-2.5 font-medium">State</th>
-              <th className="px-4 py-2.5 font-medium">Sandbox</th>
-              <th className="px-4 py-2.5 font-medium">Memory</th>
-              <th className="px-4 py-2.5 font-medium">vCPUs</th>
-              <th className="px-4 py-2.5 font-medium">Node</th>
-              <th className="px-4 py-2.5 font-medium">Age</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.map((sb) => (
-              <tr key={sb.id} className="border-b border-hairline last:border-0 hover:bg-raised/50">
-                <td className="px-4 py-2.5">
-                  <StateMark state={sb.state} />
-                </td>
-                <td className="px-4 py-2.5">
-                  <Link to={`/sandboxes/${sb.id}`} className="hover:text-ember">
-                    <Mono>{sb.id.slice(0, 8)}</Mono>
-                  </Link>
-                  <div className="flex gap-2 font-mono text-[11px] text-faint">
-                    {sb.autoscale && <span className="text-transit">autoscale</span>}
-                    {sb.forked_from && <span>fork:{sb.forked_from}</span>}
-                  </div>
-                </td>
-                <td className="px-4 py-2.5">
-                  <MemGauge
-                    state={sb.state}
-                    memoryMiB={sb.memory_mib}
-                    baseMiB={sb.base_memory_mib}
-                    maxMiB={sb.max_memory_mib}
-                  />
-                </td>
-                <td className="px-4 py-2.5">
-                  <Mono>
-                    {sb.vcpus}
-                    {(sb.max_vcpus ?? 0) > 0 && <span className="text-faint"> / {sb.max_vcpus}</span>}
-                  </Mono>
-                </td>
-                <td className="px-4 py-2.5">
-                  <Mono className="text-muted">{sb.node_id || "—"}</Mono>
-                </td>
-                <td className="px-4 py-2.5">
-                  <Mono className="text-muted">{fmtAge(sb.created_at)}</Mono>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {!isLoading && list.length === 0 && (
-          <Empty>No sandboxes. “New sandbox” boots one from a READY template.</Empty>
-        )}
-        {isLoading && <Empty>Loading…</Empty>}
-      </div>
+      <Table head={["State", "Sandbox", "Memory", "vCPUs", "Node", "Age"]}>
+        {list.map((sb) => (
+          <tr key={sb.id} className="border-b border-hairline last:border-0 hover:bg-raised/40">
+            <td className="px-4 py-2.5">
+              <StateBadge state={sb.state} />
+            </td>
+            <td className="px-4 py-2.5">
+              <Link to={`/sandboxes/${sb.id}`} className="hover:text-accent">
+                <Mono>{sb.id.slice(0, 8)}</Mono>
+              </Link>
+              <div className="flex gap-2 font-mono text-[11px] text-faint">
+                {sb.autoscale && <span className="text-transit">autoscale</span>}
+                {sb.forked_from && <span>fork:{sb.forked_from}</span>}
+              </div>
+            </td>
+            <td className="px-4 py-2.5">
+              <MemGauge
+                state={sb.state}
+                memoryMiB={sb.memory_mib}
+                baseMiB={sb.base_memory_mib}
+                maxMiB={sb.max_memory_mib}
+              />
+            </td>
+            <td className="px-4 py-2.5">
+              <Mono className="tabular-nums">
+                {sb.vcpus}
+                {(sb.max_vcpus ?? 0) > 0 && <span className="text-faint"> / {sb.max_vcpus}</span>}
+              </Mono>
+            </td>
+            <td className="px-4 py-2.5">
+              <Mono className="text-muted">{sb.node_id || "—"}</Mono>
+            </td>
+            <td className="px-4 py-2.5">
+              <Mono className="text-muted tabular-nums">{fmtAge(sb.created_at)}</Mono>
+            </td>
+          </tr>
+        ))}
+      </Table>
+      {!isLoading && list.length === 0 && (
+        <Empty>No sandboxes. “New sandbox” boots one from a READY template.</Empty>
+      )}
+      {isLoading && <Empty>Loading…</Empty>}
 
       <CreateDialog open={creating} onClose={() => setCreating(false)} />
     </div>
