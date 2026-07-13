@@ -770,7 +770,11 @@ func TestSandboxEventsEndpoint(t *testing.T) {
 // TestProxySessionCookie pins the iframe auth path: the cookie works on
 // proxy routes only, ownership still applies, and revocation sticks.
 func TestProxySessionCookie(t *testing.T) {
-	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var guestSaw struct{ cookie, authz string }
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The guest is untrusted: no platform credential may reach it.
+		guestSaw.cookie = r.Header.Get("Cookie")
+		guestSaw.authz = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte("guest-ok"))
 	}))
 	defer guest.Close()
@@ -815,6 +819,16 @@ func TestProxySessionCookie(t *testing.T) {
 
 	if w := cookieCall(http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/"); w.Code != http.StatusOK || w.Body.String() != "guest-ok" {
 		t.Errorf("cookie proxy = %d %q, want 200 guest-ok", w.Code, w.Body)
+	}
+	// The proxy-session cookie authenticated the request but must NOT be
+	// forwarded into the untrusted guest (it is a reusable owner credential).
+	if guestSaw.cookie != "" {
+		t.Errorf("guest received cookie header %q — platform credential leaked", guestSaw.cookie)
+	}
+	// A bearer-authenticated proxy request likewise must not forward the token.
+	call(h, http.MethodGet, "/v0/sandboxes/"+sb.ID+"/proxy/8080/", nil)
+	if guestSaw.authz != "" {
+		t.Errorf("guest received Authorization %q — bearer leaked", guestSaw.authz)
 	}
 	// The cookie must NOT authorize anything outside /proxy/.
 	if w := cookieCall(http.MethodGet, "/v0/sandboxes"); w.Code != http.StatusUnauthorized {

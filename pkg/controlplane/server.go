@@ -1128,6 +1128,17 @@ func (s *Server) rollbackSandbox(c *gin.Context) {
 	c.JSON(http.StatusOK, sb)
 }
 
+// stripPlatformCreds removes EmberVM's own credentials from a request before
+// it is forwarded into an (untrusted) guest. The browser attaches the
+// proxy-session cookie to every /v0/sandboxes/* request, and a bearer token
+// may ride the Authorization header; guest-controlled code must see neither
+// (a leaked proxy-session cookie is a reusable owner-scoped credential). This
+// mirrors the Sec-WebSocket-Protocol bearer stripping in TokenStore.Auth.
+func stripPlatformCreds(h http.Header) {
+	h.Del("Cookie")
+	h.Del("Authorization")
+}
+
 // proxyGuest is the M4 gateway: authenticated, owner-scoped forwarding of
 // any HTTP(S)/WebSocket traffic to a guest port. In-proc agents proxy
 // straight into the netns; split-mode agents add a UDS hop.
@@ -1158,6 +1169,7 @@ func (s *Server) proxyGuest(c *gin.Context) {
 				pr.Out.URL.Scheme = "http"
 				pr.Out.URL.Host = net.JoinHostPort(sb.ID, strconv.Itoa(port))
 				pr.Out.URL.Path = c.Param("path")
+				stripPlatformCreds(pr.Out.Header)
 			},
 			Transport: s.guestTransportFor(nodeID, g),
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
@@ -1170,6 +1182,7 @@ func (s *Server) proxyGuest(c *gin.Context) {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = c.Param("path")
+			stripPlatformCreds(r2.Header)
 			inner.ServeHTTP(w, r2)
 		})
 	default:
@@ -1775,6 +1788,10 @@ func (s *Server) termSandbox(c *gin.Context) {
 				pr.Out.URL.Scheme = "http"
 				pr.Out.URL.Host = net.JoinHostPort(sb.ID, strconv.Itoa(guestapi.Port))
 				pr.Out.URL.Path = "/term" // query (?cols=&rows=) rides along
+				// The Sec-WebSocket-Protocol bearer entry is already stripped
+				// by Auth(); drop the cookie/Authorization too so no platform
+				// credential reaches guestd.
+				stripPlatformCreds(pr.Out.Header)
 			},
 			Transport: s.guestTransportFor(nodeID, g),
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
@@ -1787,6 +1804,7 @@ func (s *Server) termSandbox(c *gin.Context) {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = "/term"
+			stripPlatformCreds(r2.Header)
 			inner.ServeHTTP(w, r2)
 		})
 	default:

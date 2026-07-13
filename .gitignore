@@ -21,3 +21,4 @@ vmlinux*
 # frontend
 web/node_modules/
 web/tsconfig.tsbuildinfo
+.playwright-mcp/

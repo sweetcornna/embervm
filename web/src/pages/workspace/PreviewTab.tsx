@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Sandbox } from "../../api/types";
-import { IconExternal, IconGlobe, IconRefresh } from "../../components/icons";
+import { IconGlobe, IconRefresh } from "../../components/icons";
 import { Tip } from "../../components/tooltip";
 import { Button, Empty, ErrorNote, IconButton, Mono, inputCls } from "../../components/ui";
 import { ensureProxySession, proxyURL } from "../../lib/proxy";
@@ -114,18 +114,14 @@ export function PreviewTab(props: { sb: Sandbox }) {
           ))}
         </div>
         <div className="ml-auto flex items-center">
+          {/* No "open in new tab": the proxy is same-origin with the console,
+              and a top-level tab is NOT covered by the iframe sandbox — guest
+              code there would run at the console's origin and could read the
+              bearer token from localStorage. Preview stays inside the
+              opaque-origin sandboxed iframe only. */}
           <Tip content="Reload preview">
             <IconButton label="Reload" onClick={() => setGeneration((g) => g + 1)} disabled={!src}>
               <IconRefresh size={13} />
-            </IconButton>
-          </Tip>
-          <Tip content="Open in a new tab">
-            <IconButton
-              label="Open in new tab"
-              onClick={() => src && window.open(src, "_blank", "noopener")}
-              disabled={!src}
-            >
-              <IconExternal size={13} />
             </IconButton>
           </Tip>
         </div>
