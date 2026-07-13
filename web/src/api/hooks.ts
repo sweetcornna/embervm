@@ -85,6 +85,15 @@ export function useSandboxEvents(id: string) {
   });
 }
 
+/** Owner-wide activity feed for the Overview page. */
+export function useFleetEvents(limit = 30) {
+  return useQuery({
+    queryKey: ["events", limit],
+    queryFn: () => api<SandboxEvents>("GET", `/events?limit=${limit}`),
+    refetchInterval: INTERVALS.events,
+  });
+}
+
 export function useStorage(id: string) {
   return useQuery({
     queryKey: ["sandboxes", id, "storage"],
