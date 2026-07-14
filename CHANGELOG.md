@@ -8,6 +8,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+## [v0.8.0] — 2026-07-14 — Default-elastic geometry — **v0.5**
+
 ### Added — M7 default-elastic geometry (ADR-0008)
 
 - **On-demand allocation is now the default.** `POST /v0/sandboxes` with no
@@ -57,6 +59,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 - No-geometry creates now store real base values in PostgreSQL and reserve
   them at placement (previously `memory_mib=0` rows under-counted
   `NodeUsage`).
+
+### Fixed
+
+- `POST /:id/restore-artifacts` now carries the resize ceilings, base
+  floors, and autoscale flag into the restored sandbox (cold-booting at
+  the ORIGINAL base) — previously a RECYCLED elastic sandbox came back
+  silently fixed, and a later resize 409'd with "ceiling 0". Pre-existing
+  gap; default-elastic made it matter for every sandbox.
 
 ### Compatibility
 
