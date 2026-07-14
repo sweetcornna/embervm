@@ -73,6 +73,12 @@ func runDev(args []string) {
 		guestdBin   = fs.String("guestd-bin", "", "guestd binary to inject into templates")
 		restoreMode = fs.String("restore-mode", "prefetch", "uffd restore mode: prefetch|lazy|file")
 		watchdog    = fs.Duration("watchdog-interval", 5*time.Second, "zombie-reaper scan interval (0 disables)")
+		// M7 default-elastic geometry: shared between the control plane's
+		// create resolution and the node's golden config so dev-mode
+		// fast-create geometry matches the resolved defaults by construction.
+		defaultElastic = fs.Bool("default-elastic", true, "no-geometry creates get a small base + default ceiling + autoscale; false restores fixed-by-default")
+		defMaxMemMiB   = fs.Int("default-max-memory-mib", 4096, "default memory ceiling (MiB) for elastic creates")
+		defMaxVCPUs    = fs.Int("default-max-vcpus", 4, "default vCPU ceiling for elastic creates")
 	)
 	_ = fs.Parse(args)
 
@@ -104,6 +110,11 @@ func runDev(args []string) {
 		GuestdBin:        *guestdBin,
 		RestoreMode:      *restoreMode,
 		WatchdogInterval: *watchdog,
+		// Inert unless goldens are enabled (needs chunked+jailed+L1+ZFS),
+		// but keeps the elastic golden geometry aligned with the control
+		// plane's defaults in every wiring.
+		GoldenMaxMemoryMiB: *defMaxMemMiB,
+		GoldenMaxVCPUs:     *defMaxVCPUs,
 	})
 	if err != nil {
 		log.Fatalf("embervm dev: %v", err)
@@ -141,6 +152,9 @@ func runDev(args []string) {
 	}
 	engine := controlplane.NewEngine(store, controlplane.SingleAgent(agent), l1, cold, engCfg)
 	srv := controlplane.NewServer(store, agent, tokens, l1, cold)
+	srv.Elastic = controlplane.ElasticDefaults{
+		Disabled: !*defaultElastic, MaxMemoryMiB: *defMaxMemMiB, MaxVCPUs: *defMaxVCPUs,
+	} // default-elastic geometry for no-geometry creates (M7)
 	engine.CanFit = srv.CanFit // autoscale growth admission (M6)
 	go engine.Run(ctx)
 	httpSrv := &http.Server{

@@ -580,6 +580,56 @@ func scanEvents(rows pgx.Rows) ([]SandboxEvent, error) {
 	return out, rows.Err()
 }
 
+// ResourceEventDetail is the sandbox_events.detail payload for resource
+// events (M7): resize, migrate, and autoscale-config changes. The console
+// discriminates on Kind; unknown kinds render as a generic row, so this
+// shape may grow but existing fields must not be renamed.
+type ResourceEventDetail struct {
+	Kind   string `json:"kind"`             // resize | migrate | autoscale_config
+	Actor  string `json:"actor,omitempty"`  // user | autoscale
+	Reason string `json:"reason,omitempty"` // manual | pressure | deferred
+	// [old, new] pairs; omitted when that dimension did not move.
+	MemoryMiB *[2]int `json:"memory_mib,omitempty"`
+	VCPUs     *[2]int `json:"vcpus,omitempty"`
+	// Migrate endpoints.
+	FromNode string `json:"from_node,omitempty"`
+	ToNode   string `json:"to_node,omitempty"`
+	// Pressure context for autoscale actions (best-effort).
+	PSIMem   float64 `json:"psi_mem,omitempty"`
+	AvailPct float64 `json:"avail_pct,omitempty"`
+	// Autoscale-config toggles.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// AppendSandboxEvent records a non-transition event on a sandbox's timeline
+// (M7 resource events): from_state = to_state = the current state, detail
+// carries the typed payload. Callers treat failures as advisory — an event
+// row must never veto the operation it describes.
+func (s *Store) AppendSandboxEvent(ctx context.Context, id, state string, detail any) error {
+	data, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO sandbox_events (sandbox_id, from_state, to_state, detail) VALUES ($1,$2,$2,$3)`,
+		id, state, data)
+	return err
+}
+
+// SetSandboxAutoscale flips the engine's pressure-driven resize loop for one
+// sandbox at runtime (M7; create-time was the only switch before).
+func (s *Store) SetSandboxAutoscale(ctx context.Context, id string, on bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandboxes SET autoscale=$2, updated_at=now() WHERE id=$1`, id, on)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetPrewarmedAt stamps the last pre-warm pull (nil clears it, e.g. on pause).
 func (s *Store) SetPrewarmedAt(ctx context.Context, id string, at *time.Time) error {
 	tag, err := s.pool.Exec(ctx,
@@ -709,11 +759,18 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	return out, rows.Err()
 }
 
-// Usage is one node's active-sandbox resource footprint.
+// Usage is one node's active-sandbox resource footprint. MemMiB/VCPUs sum
+// CURRENT effective geometry (the bin-packing constraint); Base*/Ceiling*
+// sum the create-time floors and resize ceilings (M7 oversell reporting —
+// fixed-geometry rows count their effective values on both ends).
 type Usage struct {
-	MemMiB int
-	VCPUs  int
-	Active int // active sandboxes placed on the node
+	MemMiB       int
+	VCPUs        int
+	Active       int // active sandboxes placed on the node
+	BaseMemMiB   int
+	BaseVCPUs    int
+	CeilingMiB   int
+	CeilingVCPUs int
 }
 
 // NodeUsage sums the memory and vCPUs of active sandboxes per node (the
@@ -725,7 +782,12 @@ func (s *Store) NodeUsage(ctx context.Context) (map[string]Usage, error) {
 	// excluding it lets concurrent placements all read the same free budget
 	// and overshoot even the oversold ceiling.
 	rows, err := s.pool.Query(ctx,
-		`SELECT node_id, COALESCE(SUM(memory_mib),0), COALESCE(SUM(vcpus),0), COUNT(*) FROM sandboxes
+		`SELECT node_id, COALESCE(SUM(memory_mib),0), COALESCE(SUM(vcpus),0), COUNT(*),
+		        COALESCE(SUM(COALESCE(NULLIF(base_memory_mib,0), memory_mib)),0),
+		        COALESCE(SUM(COALESCE(NULLIF(base_vcpus,0), vcpus)),0),
+		        COALESCE(SUM(COALESCE(NULLIF(max_memory_mib,0), memory_mib)),0),
+		        COALESCE(SUM(COALESCE(NULLIF(max_vcpus,0), vcpus)),0)
+		 FROM sandboxes
 		 WHERE state IN ('PENDING','STARTING','RUNNING','RESUMING','PAUSING') AND node_id <> ''
 		 GROUP BY node_id`)
 	if err != nil {
@@ -736,7 +798,8 @@ func (s *Store) NodeUsage(ctx context.Context) (map[string]Usage, error) {
 	for rows.Next() {
 		var id string
 		var u Usage
-		if err := rows.Scan(&id, &u.MemMiB, &u.VCPUs, &u.Active); err != nil {
+		if err := rows.Scan(&id, &u.MemMiB, &u.VCPUs, &u.Active,
+			&u.BaseMemMiB, &u.BaseVCPUs, &u.CeilingMiB, &u.CeilingVCPUs); err != nil {
 			return nil, err
 		}
 		out[id] = u

@@ -71,6 +71,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("lifecycle engine config: %v", err)
 	}
+	elastic, err := controlplane.ElasticDefaultsFromEnv()
+	if err != nil {
+		log.Fatalf("default-elastic config: %v", err)
+	}
 
 	var srv *controlplane.Server
 	var resolver controlplane.AgentResolver
@@ -103,6 +107,7 @@ func main() {
 		resolver = controlplane.SingleAgent(agent)
 		fmt.Printf("apiserver listening addr=%s nodeagent=%s\n", *listen, *naSocket)
 	}
+	srv.Elastic = elastic // default-elastic geometry for no-geometry creates (M7)
 	engine := controlplane.NewEngine(store, resolver, l1, cold, engCfg)
 	engine.CanFit = srv.CanFit // autoscale growth admission (M6)
 	go engine.Run(ctx)

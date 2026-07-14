@@ -8,6 +8,64 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+### Added — M7 default-elastic geometry (ADR-0008)
+
+- **On-demand allocation is now the default.** `POST /v0/sandboxes` with no
+  geometry fields creates an ELASTIC sandbox: base 256 MiB / 1 vCPU, resize
+  ceiling 4 GiB / 4 vCPU, **autoscale on** — it starts small and grows with
+  guest pressure instead of being fixed at creation. Explicit geometry
+  keeps its M6 meaning (base without `max_*` = fixed; base + `max_*` =
+  user-declared elastic), so existing clients are unaffected. A ceiling
+  without a base (`{"max_memory_mib": …}`) is now valid and gets the
+  default base — the console presets' shape. Knobs:
+  `EMBERVM_DEFAULT_MAX_MEMORY_MIB`, `EMBERVM_DEFAULT_MAX_VCPUS`, and
+  `EMBERVM_DEFAULT_ELASTIC=false` to restore the pre-M7 behavior
+  (`embervm dev` mirrors them as `--default-*` flags).
+- **Elastic golden snapshots** — templates now bake a second golden with
+  the hotplug region + max boot cores (`Config.GoldenMaxMemoryMiB/
+  GoldenMaxVCPUs`; new `--golden-*` flags on `cmd/nodeagent`, which
+  previously could not enable goldens at all), so default-elastic creates
+  fast-create (<500 ms P50) instead of cold-booting. Gated by `e2e-m7`
+  (`TestFastCreateElasticKVM`), which also proves hotplug resize on a
+  jailed golden clone across pause/resume and measures the memmap tax of
+  the 4 GiB default ceiling.
+- **Runtime autoscale toggle** — `POST /v0/sandboxes/:id/autoscale
+  {"autoscale": bool}` (enabling requires a ceiling; audited on the
+  timeline).
+- **Resource timeline events** — resize (user AND autoscale, with pressure
+  context; deferred-growth once per episode), migrate, and autoscale
+  toggles now land in `sandbox_events` as typed `detail` payloads
+  (`kind: resize|migrate|autoscale_config`); `GET /v0/events` carries them
+  unchanged.
+- **Node oversell reporting** — `GET /v0/nodes` adds `base_mib`,
+  `ceiling_mib`, `base_vcpus`, `ceiling_vcpus`, `mem_budget_mib`,
+  `vcpu_budget` (all additive).
+- **Console: complete resource management** — elastic-by-default create
+  dialog with ceiling presets + advanced/fixed modes; workspace Resources
+  panel (memory+CPU gauges, effective-memory history chart with base/max
+  reference lines, honest autoscale-vs-manual interplay with "turn off
+  autoscale & apply", node-full 409 panel offering migrate-and-retry,
+  scaling-activity card, runtime autoscale toggle with pre-M7 degradation);
+  fleet list headroom sort + last-scale column + autoscale filter; Nodes
+  oversell bars (base/effective/ceiling vs capacity & budget); activity
+  feed All/Lifecycle/Resources filters; ⌘K resize/toggle/migrate actions.
+
+### Changed
+
+- The lifecycle engine's autoscale scan probes guests concurrently with a
+  3s per-probe deadline (one wedged guest no longer stalls the whole tick).
+- No-geometry creates now store real base values in PostgreSQL and reserve
+  them at placement (previously `memory_mib=0` rows under-counted
+  `NodeUsage`).
+
+### Compatibility
+
+- `autoscale` in the create body is now tri-state (`null` = platform
+  default). Omitting it behaves as before whenever any geometry is passed.
+- Old golden.json objects, descriptors (FormatVersion 1), and pre-M7
+  consoles/servers interoperate unchanged; new node fields and the
+  `/autoscale` route degrade gracefully in both directions.
+
 ## [v0.7.1] — 2026-07-14 — Bilingual console — **v0.4.1**
 
 ### Added

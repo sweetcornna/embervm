@@ -60,6 +60,11 @@ type Server struct {
 	// cookie session (POST /v0/proxy-session) honored ONLY on proxy routes.
 	psMu          sync.Mutex
 	proxySessions map[string]proxySession
+
+	// Elastic configures the M7 default-elastic geometry for creates that
+	// name none. Assigned post-construction like Engine.CanFit; the zero
+	// value enables the platform defaults (see ElasticDefaults).
+	Elastic ElasticDefaults
 }
 
 type proxySession struct {
@@ -204,6 +209,7 @@ func (s *Server) Handler() http.Handler {
 	v0.POST("/sandboxes/:id/resume", s.resumeSandbox)
 	v0.POST("/sandboxes/:id/snapshot", s.snapshotSandbox)
 	v0.POST("/sandboxes/:id/resize", s.resizeSandbox)
+	v0.POST("/sandboxes/:id/autoscale", s.setAutoscale)
 	v0.POST("/sandboxes/:id/migrate", s.migrateSandbox)
 	v0.DELETE("/sandboxes/:id", s.killSandbox)
 
@@ -369,24 +375,7 @@ func (s *Server) deleteTemplate(c *gin.Context) {
 
 func (s *Server) createSandbox(c *gin.Context) {
 	owner := tokenInfo(c)
-	var body struct {
-		TemplateID  string `json:"template_id"`
-		VCPUs       int    `json:"vcpus"`
-		MemoryMiB   int    `json:"memory_mib"`
-		DataDiskGiB int    `json:"data_disk_gib"`
-		// ArtifactPaths are preserved when the sandbox is RECYCLED
-		// (M3 selective restore); empty keeps nothing.
-		ArtifactPaths []string `json:"artifact_paths"`
-		Egress        string   `json:"egress"`
-		// M6 runtime-resize ceilings; 0 = fixed geometry. Setting a ceiling
-		// requires the corresponding base field (the node's defaults are not
-		// visible here, so a bound against an unknown base is meaningless).
-		MaxMemoryMiB int `json:"max_memory_mib"`
-		MaxVCPUs     int `json:"max_vcpus"`
-		// Autoscale opts into the engine's pressure-driven resize loop
-		// within [memory_mib, max_memory_mib] / [vcpus, max_vcpus].
-		Autoscale bool `json:"autoscale"`
-	}
+	var body createSandboxBody
 	if err := c.ShouldBindJSON(&body); err != nil {
 		abortErr(c, http.StatusBadRequest, err)
 		return
@@ -399,11 +388,22 @@ func (s *Server) createSandbox(c *gin.Context) {
 		abortErr(c, http.StatusBadRequest, err)
 		return
 	}
+	// M7 default-elastic resolution runs before validateCeilings: it fills
+	// the base for no-geometry (and ceiling-only) creates, so the ceiling
+	// checks below always see an explicit base when the feature is on.
+	body, err := resolveGeometry(body, s.Elastic)
+	if err != nil {
+		abortErr(c, http.StatusBadRequest, err)
+		return
+	}
 	if err := validateCeilings(body.VCPUs, body.MemoryMiB, body.MaxVCPUs, body.MaxMemoryMiB); err != nil {
 		abortErr(c, http.StatusBadRequest, err)
 		return
 	}
-	if body.Autoscale && body.MaxMemoryMiB == 0 && body.MaxVCPUs == 0 {
+	autoscale := body.Autoscale != nil && *body.Autoscale
+	if autoscale && body.MaxMemoryMiB == 0 && body.MaxVCPUs == 0 {
+		// Only reachable with ElasticDefaults.Disabled (the resolver either
+		// fills ceilings or rejects this combination itself).
 		abortErr(c, http.StatusBadRequest, errors.New("autoscale requires max_memory_mib and/or max_vcpus"))
 		return
 	}
@@ -442,7 +442,7 @@ func (s *Server) createSandbox(c *gin.Context) {
 		VCPUs: body.VCPUs, MemoryMiB: body.MemoryMiB, DataDiskGiB: body.DataDiskGiB, Owner: owner.Owner,
 		ArtifactPaths: body.ArtifactPaths,
 		MaxMemoryMiB:  body.MaxMemoryMiB, MaxVCPUs: body.MaxVCPUs,
-		BaseMemoryMiB: body.MemoryMiB, BaseVCPUs: body.VCPUs, Autoscale: body.Autoscale,
+		BaseMemoryMiB: body.MemoryMiB, BaseVCPUs: body.VCPUs, Autoscale: autoscale,
 	})
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
@@ -508,6 +508,8 @@ func validateGeometry(vcpus, memoryMiB, dataDiskGiB int) error {
 // validateCeilings bounds the M6 resize ceilings. A ceiling needs an
 // explicit base: the node fills zero bases with defaults the control plane
 // cannot see, and "max ≥ an unknown base" is not a checkable contract.
+// With M7 default-elastic enabled, resolveGeometry always supplies the base
+// first, so the base-required arms only bite in Disabled deployments.
 func validateCeilings(vcpus, memoryMiB, maxVCPUs, maxMemoryMiB int) error {
 	switch {
 	case maxMemoryMiB != 0 && memoryMiB == 0:
@@ -645,9 +647,62 @@ func (s *Server) resizeSandbox(c *gin.Context) {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
+	// Timeline event (M7): advisory — the resize already happened. Zero
+	// achieved values mean "dimension untouched" (mock agents report the
+	// request verbatim; the real node always reports full geometry).
+	detail := ResourceEventDetail{Kind: "resize", Actor: "user", Reason: "manual"}
+	if res.MemoryMiB > 0 && res.MemoryMiB != sb.MemoryMiB {
+		detail.MemoryMiB = &[2]int{sb.MemoryMiB, res.MemoryMiB}
+	}
+	if res.VCPUs > 0 && res.VCPUs != sb.VCPUs {
+		detail.VCPUs = &[2]int{sb.VCPUs, res.VCPUs}
+	}
+	if detail.MemoryMiB != nil || detail.VCPUs != nil {
+		if err := s.store.AppendSandboxEvent(c, id, sb.State, detail); err != nil {
+			log.Printf("controlplane: resize %s: record event: %v", id, err)
+		}
+	}
 	sb.VCPUs, sb.MemoryMiB = res.VCPUs, res.MemoryMiB
 	metrics.ResizeTotal.WithLabelValues("ok").Inc()
 	metrics.ResizeSeconds.Observe(time.Since(start).Seconds())
+	c.JSON(http.StatusOK, sb)
+}
+
+// setAutoscale flips the engine's pressure-driven resize loop for one
+// sandbox at runtime (M7). Enabling requires a resize ceiling — a fixed
+// sandbox has no room for the engine to move in.
+func (s *Server) setAutoscale(c *gin.Context) {
+	id := c.Param("id")
+	sb, ok := s.ownedSandbox(c, id)
+	if !ok {
+		return
+	}
+	var body struct {
+		Autoscale bool `json:"autoscale"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		abortErr(c, http.StatusBadRequest, err)
+		return
+	}
+	if body.Autoscale && sb.MaxMemoryMiB == 0 && sb.MaxVCPUs == 0 {
+		abortErr(c, http.StatusConflict,
+			errors.New("autoscale requires a resize ceiling (create the sandbox with max_memory_mib and/or max_vcpus)"))
+		return
+	}
+	if sb.Autoscale == body.Autoscale {
+		c.JSON(http.StatusOK, sb) // idempotent no-op
+		return
+	}
+	if err := s.store.SetSandboxAutoscale(c, id, body.Autoscale); err != nil {
+		abortErr(c, storeStatus(err), err)
+		return
+	}
+	sb.Autoscale = body.Autoscale
+	if err := s.store.AppendSandboxEvent(c, id, sb.State, ResourceEventDetail{
+		Kind: "autoscale_config", Actor: "user", Enabled: &body.Autoscale,
+	}); err != nil {
+		log.Printf("controlplane: autoscale toggle %s: record event: %v", id, err)
+	}
 	c.JSON(http.StatusOK, sb)
 }
 
@@ -755,11 +810,30 @@ func (s *Server) listNodes(c *gin.Context) {
 		UsedMiB   int `json:"used_mib"`
 		UsedVCPUs int `json:"used_vcpus"`
 		Active    int `json:"active_sandboxes"`
+		// M7 oversell view: committed bases, ceiling sums, and the budgets
+		// the scheduler actually enforces. All additive/omitempty so old
+		// consoles (and tests) see the same shape as before.
+		BaseMiB      int `json:"base_mib,omitempty"`
+		BaseVCPUs    int `json:"base_vcpus,omitempty"`
+		CeilingMiB   int `json:"ceiling_mib,omitempty"`
+		CeilingVCPUs int `json:"ceiling_vcpus,omitempty"`
+		MemBudgetMiB int `json:"mem_budget_mib,omitempty"` // capacity × MemOvercommit; 0 = unlimited
+		VCPUBudget   int `json:"vcpu_budget,omitempty"`    // cores × CPUOvercommit; 0 = unconstrained
 	}
+	memOver, cpuOver := s.sched.Overcommit()
 	out := make([]nodeView, 0, len(nodes))
 	for _, n := range nodes {
 		u := usage[n.ID]
-		out = append(out, nodeView{Node: n, UsedMiB: u.MemMiB, UsedVCPUs: u.VCPUs, Active: u.Active})
+		v := nodeView{Node: n, UsedMiB: u.MemMiB, UsedVCPUs: u.VCPUs, Active: u.Active,
+			BaseMiB: u.BaseMemMiB, BaseVCPUs: u.BaseVCPUs,
+			CeilingMiB: u.CeilingMiB, CeilingVCPUs: u.CeilingVCPUs}
+		if n.CapacityMiB > 0 {
+			v.MemBudgetMiB = int(float64(n.CapacityMiB) * memOver)
+		}
+		if n.CPUCores > 0 {
+			v.VCPUBudget = int(float64(n.CPUCores) * cpuOver)
+		}
+		out = append(out, v)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -850,12 +924,21 @@ func (s *Server) migrateSandbox(c *gin.Context) {
 		migErr(http.StatusInternalServerError, err)
 		return
 	}
+	srcNode := sb.NodeID
 	sb.NodeID = target
 	sb.State = string(lifecycle.StatePausedWarm)
+	recordMigrate := func() {
+		if err := s.store.AppendSandboxEvent(c, id, sb.State, ResourceEventDetail{
+			Kind: "migrate", Actor: "user", FromNode: srcNode, ToNode: target,
+		}); err != nil {
+			log.Printf("controlplane: migrate %s: record event: %v", id, err)
+		}
+	}
 
 	// A paused sandbox is migrated at this point: it lives in L1 with its
 	// placement pointing at the target.
 	if state == lifecycle.StatePausedHot {
+		recordMigrate()
 		metrics.Migrations.WithLabelValues("ok").Inc()
 		c.JSON(http.StatusOK, sb)
 		return
@@ -888,6 +971,7 @@ func (s *Server) migrateSandbox(c *gin.Context) {
 			sb.MemoryMiB, sb.VCPUs = st.MemoryMiB, st.VCPUs
 		}
 	}
+	recordMigrate()
 	metrics.Migrations.WithLabelValues("ok").Inc()
 	c.JSON(http.StatusOK, sb)
 }

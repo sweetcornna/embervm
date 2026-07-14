@@ -47,6 +47,15 @@ func main() {
 		kernelVer   = flag.String("kernel-version", "", "guest kernel version stamped into snapshot manifests")
 		jailerBin   = flag.String("jailer-bin", "", "jailer binary; enables chroot+uid/gid+seccomp hardening when set")
 		jailRoot    = flag.String("jailer-chroot-base", "/srv/jailer", "jailer chroot base directory")
+		// Golden fast-create (M4; requires chunked+jailer+L1+ZFS). The
+		// max-* pair additionally bakes an elastic golden (M7) — keep it
+		// equal to the control plane's default-elastic ceilings or default
+		// creates silently cold-boot.
+		goldenVCPUs   = flag.Int("golden-vcpus", 0, "golden snapshot vCPUs (with --golden-memory-mib)")
+		goldenMemMiB  = flag.Int("golden-memory-mib", 0, "golden snapshot base memory MiB (0 disables golden fast-create)")
+		goldenDiskGiB = flag.Int("golden-data-disk-gib", 15, "golden snapshot data disk GiB")
+		goldenMaxMem  = flag.Int("golden-max-memory-mib", 0, "elastic golden memory ceiling MiB (0 = fixed golden only)")
+		goldenMaxCPUs = flag.Int("golden-max-vcpus", 0, "elastic golden vCPU ceiling (0 = fixed golden only)")
 	)
 	flag.Parse()
 
@@ -68,21 +77,26 @@ func main() {
 	}
 
 	agent, err := nodeagent.New(nodeagent.Config{
-		Storage:          backend,
-		Pool:             p,
-		WorkDir:          *workDir,
-		KernelPath:       *kernel,
-		FCBin:            *fcBin,
-		UffdHandlerBin:   *uffdBin,
-		GuestdBin:        *guestdBin,
-		RestoreMode:      *restoreMode,
-		WatchdogInterval: *watchdog,
-		ChunkStoreDir:    *chunkDir,
-		CapacityMiB:      *capacity,
-		FCVersion:        *fcVersion,
-		KernelVersion:    *kernelVer,
-		JailerBin:        *jailerBin,
-		JailerChrootBase: *jailRoot,
+		Storage:            backend,
+		Pool:               p,
+		WorkDir:            *workDir,
+		KernelPath:         *kernel,
+		FCBin:              *fcBin,
+		UffdHandlerBin:     *uffdBin,
+		GuestdBin:          *guestdBin,
+		RestoreMode:        *restoreMode,
+		WatchdogInterval:   *watchdog,
+		ChunkStoreDir:      *chunkDir,
+		CapacityMiB:        *capacity,
+		FCVersion:          *fcVersion,
+		KernelVersion:      *kernelVer,
+		JailerBin:          *jailerBin,
+		JailerChrootBase:   *jailRoot,
+		GoldenVCPUs:        *goldenVCPUs,
+		GoldenMemoryMiB:    *goldenMemMiB,
+		GoldenDataDiskGiB:  *goldenDiskGiB,
+		GoldenMaxMemoryMiB: *goldenMaxMem,
+		GoldenMaxVCPUs:     *goldenMaxCPUs,
 	})
 	if err != nil {
 		log.Fatalf("nodeagent: %v", err)
