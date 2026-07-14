@@ -108,6 +108,12 @@ func NewScheduler(store *Store, registry *Registry, cfg SchedulerConfig) *Schedu
 	return &Scheduler{store: store, registry: registry, cfg: cfg.withDefaults(), misses: map[string]int{}}
 }
 
+// Overcommit exposes the placement budget multipliers so the nodes API can
+// report the budgets the scheduler actually enforces (M7 oversell view).
+func (s *Scheduler) Overcommit() (mem, cpu float64) {
+	return s.cfg.MemOvercommit, s.cfg.CPUOvercommit
+}
+
 // RegisterNodes writes the static membership into the nodes table: members
 // are upserted and revived (an upsert keeps an existing row's state, so a
 // previously-retired node must be touched back up), and rows absent from

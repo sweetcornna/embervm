@@ -36,15 +36,25 @@ type goldenMeta struct {
 	MemoryMiB   int    `json:"memory_mib"`
 	DataDiskGiB int    `json:"data_disk_gib"`
 	// M6: the hotplug region is part of the snapshot, so it is part of the
-	// geometry. Goldens are built with fixed geometry (Max == base); a
-	// resize-enabled create must miss and cold-boot. Old golden.json reads
-	// as 0 and is normalized to the base on load.
+	// geometry. M7 builds TWO golden slots per template — fixed (Max ==
+	// base, the pre-M7 shape) and, when Config.GoldenMax* is set, elastic
+	// (hotplug region + max boot cores baked in) — so default-elastic
+	// creates fast-create too. Old golden.json reads as 0 and is
+	// normalized to the base on load.
 	MaxMemoryMiB int `json:"max_memory_mib,omitempty"`
 	MaxVCPUs     int `json:"max_vcpus,omitempty"`
 }
 
-// keyGolden is the L1 object recording a template's golden snapshot.
+// keyGolden is the L1 object recording a template's fixed golden snapshot.
 func keyGolden(tid string) string { return "templates/" + tid + "/golden.json" }
+
+// keyGoldenElastic is the L1 object recording a template's elastic golden
+// snapshot (M7).
+func keyGoldenElastic(tid string) string { return "templates/" + tid + "/golden-elastic.json" }
+
+// goldenElasticSuffix distinguishes the elastic slot in the in-memory map
+// and the derived golden sandbox id.
+const goldenElasticSuffix = "#elastic"
 
 // goldenID derives a deterministic, id-safe golden sandbox name.
 func goldenID(templateID string) string {
@@ -58,23 +68,52 @@ func (a *Agent) goldenEnabled() bool {
 	return a.cfg.GoldenMemoryMiB > 0 && a.chunked() && a.jailed() && a.l1 != nil && isRepl
 }
 
-// buildGolden boots one sandbox from the freshly built template, pauses it
-// through the normal write-through pipeline, releases its runtime resources
-// (lease, in-memory entry) while KEEPING the dataset snapshot and staging
-// files, and records templates/<tid>/golden.json in L1.
+// buildGolden boots golden sandboxes from the freshly built template — a
+// fixed-geometry one, plus an elastic one when Config.GoldenMax* is set
+// (M7) — pausing each through the normal write-through pipeline and
+// recording its meta in L1. The elastic slot is itself an optimization on
+// an optimization: its failure keeps the fixed golden.
 func (a *Agent) buildGolden(ctx context.Context, templateID string) error {
-	gid := goldenID(templateID)
-	meta := goldenMeta{
-		SandboxID:   gid,
+	base := goldenMeta{
+		SandboxID:   goldenID(templateID),
 		VCPUs:       max(a.cfg.GoldenVCPUs, 1),
 		MemoryMiB:   a.cfg.GoldenMemoryMiB,
 		DataDiskGiB: max(a.cfg.GoldenDataDiskGiB, 1),
 	}
 	// Fixed geometry: no hotplug region in the golden snapshot (M6).
-	meta.MaxMemoryMiB, meta.MaxVCPUs = meta.MemoryMiB, meta.VCPUs
+	base.MaxMemoryMiB, base.MaxVCPUs = base.MemoryMiB, base.VCPUs
+	if err := a.buildGoldenSlot(ctx, templateID, templateID, keyGolden(templateID), base); err != nil {
+		return err
+	}
+	if a.cfg.GoldenMaxMemoryMiB <= base.MemoryMiB && a.cfg.GoldenMaxVCPUs <= base.VCPUs {
+		return nil
+	}
+	// Elastic slot (M7). Apply CreateSandbox's ceiling normalization HERE:
+	// goldenFor compares against the normalized request, so meta recorded
+	// with raw config values would never match.
+	elastic := base
+	elastic.SandboxID = goldenID(templateID + goldenElasticSuffix)
+	if a.cfg.GoldenMaxMemoryMiB > elastic.MemoryMiB {
+		elastic.MaxMemoryMiB = elastic.MemoryMiB +
+			roundUpMiB(a.cfg.GoldenMaxMemoryMiB-elastic.MemoryMiB, hotplugSlotMiB)
+	}
+	elastic.MaxVCPUs = max(a.cfg.GoldenMaxVCPUs, elastic.VCPUs)
+	if err := a.buildGoldenSlot(ctx, templateID, templateID+goldenElasticSuffix,
+		keyGoldenElastic(templateID), elastic); err != nil {
+		log.Printf("nodeagent: elastic golden for %s failed (elastic creates cold-boot): %v", templateID, err)
+	}
+	return nil
+}
+
+// buildGoldenSlot boots one golden sandbox with meta's geometry, pauses it,
+// releases its runtime resources (lease, in-memory entry) while KEEPING the
+// dataset snapshot and staging files, and records the meta under l1Key.
+func (a *Agent) buildGoldenSlot(ctx context.Context, templateID, mapKey, l1Key string, meta goldenMeta) error {
+	gid := meta.SandboxID
 	if _, err := a.CreateSandbox(ctx, nodeapi.CreateSandboxRequest{
 		SandboxID: gid, TemplateID: templateID,
 		VCPUs: meta.VCPUs, MemoryMiB: meta.MemoryMiB, DataDiskGiB: meta.DataDiskGiB,
+		MaxMemoryMiB: meta.MaxMemoryMiB, MaxVCPUs: meta.MaxVCPUs,
 	}); err != nil {
 		return fmt.Errorf("golden boot: %w", err)
 	}
@@ -97,7 +136,7 @@ func (a *Agent) buildGolden(ctx context.Context, templateID string) error {
 		a.removeCgroup(sb.id)
 		sb.lease.Release()
 		a.mu.Lock()
-		a.golden[templateID] = meta
+		a.golden[mapKey] = meta
 		a.mu.Unlock()
 	}
 
@@ -105,26 +144,33 @@ func (a *Agent) buildGolden(ctx context.Context, templateID string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.l1.PutObject(ctx, keyGolden(templateID), bytes.NewReader(data), int64(len(data))); err != nil {
+	if err := a.l1.PutObject(ctx, l1Key, bytes.NewReader(data), int64(len(data))); err != nil {
 		return fmt.Errorf("golden meta: %w", err)
 	}
-	log.Printf("nodeagent: golden snapshot for template %s ready (%s, %dMiB)", templateID, gid, meta.MemoryMiB)
+	log.Printf("nodeagent: golden snapshot for template %s ready (%s, %dMiB ceiling %dMiB/%d vcpus)",
+		templateID, gid, meta.MemoryMiB, meta.MaxMemoryMiB, meta.MaxVCPUs)
 	return nil
 }
 
 // goldenFor finds a usable golden snapshot for the geometry, checking the
 // in-memory record first and falling back to L1 (another build on this
 // node's lifetime, or a rebuild after agent restart with the golden dataset
-// still present).
+// still present). The request is already normalized (CreateSandbox rounds
+// ceilings before calling here); an elastic request selects the elastic
+// slot (M7), everything else the fixed one.
 func (a *Agent) goldenFor(ctx context.Context, templateID string, req nodeapi.CreateSandboxRequest) (goldenMeta, bool) {
 	if !a.goldenEnabled() {
 		return goldenMeta{}, false
 	}
+	mapKey, l1Key := templateID, keyGolden(templateID)
+	if req.MaxMemoryMiB > req.MemoryMiB || req.MaxVCPUs > req.VCPUs {
+		mapKey, l1Key = templateID+goldenElasticSuffix, keyGoldenElastic(templateID)
+	}
 	a.mu.Lock()
-	meta, ok := a.golden[templateID]
+	meta, ok := a.golden[mapKey]
 	a.mu.Unlock()
 	if !ok {
-		if err := getJSONFrom(ctx, a.l1, keyGolden(templateID), &meta); err != nil {
+		if err := getJSONFrom(ctx, a.l1, l1Key, &meta); err != nil {
 			return goldenMeta{}, false
 		}
 	}
@@ -135,9 +181,14 @@ func (a *Agent) goldenFor(ctx context.Context, templateID string, req nodeapi.Cr
 	if meta.MaxVCPUs < meta.VCPUs {
 		meta.MaxVCPUs = meta.VCPUs
 	}
-	if req.VCPUs != meta.VCPUs || req.MemoryMiB != meta.MemoryMiB || req.DataDiskGiB != meta.DataDiskGiB ||
-		req.MaxMemoryMiB != meta.MaxMemoryMiB || req.MaxVCPUs != meta.MaxVCPUs {
-		return goldenMeta{}, false // geometry (incl. hotplug region) mismatch: cold boot
+	if !goldenMatches(meta, req) {
+		// Loud on purpose: a control-plane default drifting from the node's
+		// golden config degrades every default create to a silent cold
+		// boot — this line is the diagnostic.
+		log.Printf("nodeagent: golden %s geometry mismatch (golden %d/%dMiB max %d/%dMiB disk %dGiB; req %d/%dMiB max %d/%dMiB disk %dGiB): cold boot",
+			mapKey, meta.VCPUs, meta.MemoryMiB, meta.MaxVCPUs, meta.MaxMemoryMiB, meta.DataDiskGiB,
+			req.VCPUs, req.MemoryMiB, req.MaxVCPUs, req.MaxMemoryMiB, req.DataDiskGiB)
+		return goldenMeta{}, false
 	}
 	// The golden dataset snapshot must exist locally to clone from.
 	gsb := &sandbox{id: meta.SandboxID, dir: filepath.Join(a.cfg.WorkDir, meta.SandboxID)}
@@ -145,6 +196,16 @@ func (a *Agent) goldenFor(ctx context.Context, templateID string, req nodeapi.Cr
 		return goldenMeta{}, false
 	}
 	return meta, true
+}
+
+// goldenMatches reports whether a NORMALIZED create request's geometry is
+// exactly the golden's. The hotplug region is part of the snapshot, so the
+// ceilings must match too — a near-miss cannot be served (the region size
+// is baked into the FC snapfile).
+func goldenMatches(meta goldenMeta, req nodeapi.CreateSandboxRequest) bool {
+	return req.VCPUs == meta.VCPUs && req.MemoryMiB == meta.MemoryMiB &&
+		req.DataDiskGiB == meta.DataDiskGiB &&
+		req.MaxMemoryMiB == meta.MaxMemoryMiB && req.MaxVCPUs == meta.MaxVCPUs
 }
 
 // fastCreate clones the golden snapshot into a new identity and hot-restores

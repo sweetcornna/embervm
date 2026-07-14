@@ -33,6 +33,7 @@ type cpMockAgent struct {
 	lastFork    struct{ parent, layer, newID string }
 	lastRB      struct{ id, layer string }
 	lastResize  nodeapi.ResizeRequest
+	lastCreate  nodeapi.CreateSandboxRequest
 }
 
 func (m *cpMockAgent) BuildTemplate(_ context.Context, id, image string) error { return m.buildErr }
@@ -59,6 +60,7 @@ func (m *cpMockAgent) Rollback(_ context.Context, id, layer string) (nodeapi.San
 	return nodeapi.SandboxStatus{SandboxID: id, State: "RUNNING", Netns: "ember0"}, nil
 }
 func (m *cpMockAgent) CreateSandbox(_ context.Context, req nodeapi.CreateSandboxRequest) (nodeapi.SandboxStatus, error) {
+	m.lastCreate = req
 	if m.createErr != nil {
 		return nodeapi.SandboxStatus{}, m.createErr
 	}
@@ -264,10 +266,10 @@ func TestServerResize(t *testing.T) {
 		t.Errorf("fixed-geometry resize = %d, want 409: %s", w.Code, w.Body)
 	}
 
-	// Ceiling without a base is a 400 at create.
-	if w := call(h, http.MethodPost, "/v0/sandboxes", map[string]any{"template_id": tpl.ID, "max_memory_mib": 1024}); w.Code != http.StatusBadRequest {
-		t.Errorf("ceiling-without-base create = %d, want 400: %s", w.Code, w.Body)
-	}
+	// M7: a ceiling without a base is now a valid create (the resolver
+	// fills the default base) — covered by TestServerCreateCeilingOnly;
+	// the legacy 400 survives only with ElasticDefaults.Disabled, covered
+	// by TestServerCreateElasticDisabled.
 }
 
 // TestServerMigrate walks the M6 migrate verb on a two-node cluster: a

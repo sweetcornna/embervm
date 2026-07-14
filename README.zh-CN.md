@@ -74,6 +74,7 @@ Firecracker 需要 `/dev/kvm`（裸金属或嵌套虚拟化）。已核实矩阵
 - [x] M4（第 14-16 周）：弹性与生产加固——多节点调度器（轮询心跳、粘性 + bin-pack 放置、驱逐 + 异机恢复）、jailer 加固 Firecracker、golden 快速创建（<500ms）、单节点 50 并发、WebSocket 透传网关代理、netns 级 egress 策略、Prometheus 指标（[ADR-0005](docs/adr/0005-m4-elasticity-hardening.md)；退出标准——3 节点集群 kill -9 任一 worker 沙箱可异机恢复、G1-G6 全部验收见 [docs/acceptance-v0.1.md](docs/acceptance-v0.1.md)——嵌套虚拟化 CI 验证）→ **开源 v0.1 发布**
 - [x] M5（可选）：Agent 原生 fork/branch/rollback——checkpoint 一等 API、任意检查点 fork N 并行分支（ZFS clone + 内容寻址 chunk 共享 = 磁盘+内存 CoW）、原地 rollback、每步 exec 自动打点支持 time-travel 重放（[ADR-0006](docs/adr/0006-m5-fork-branch.md)；退出标准——单沙箱 fork 出 10 分支并行执行且父实例不停顿——嵌套虚拟化 CI 验证）
 - [x] M6：运行时弹性——单沙箱内存运行时可增可减（virtio-mem 真热插拔，宿主真实回收,跨 chunked pause / uffd restore 存活）、CPU 按开机核数上限内配额伸缩（cgroup cpu.max）、按 guest 压力自动弹性（PSI/MemAvailable → 生命周期引擎）、显式跨节点 `migrate` 动词（[ADR-0007](docs/adr/0007-m6-runtime-resize.md)，底座对比见 [docs/zh/07](docs/zh/07-沙箱隔离方案深度对比.md)；退出标准——resize 双向跨快照恢复存活、真实压力驱动自动扩缩、RUNNING 沙箱活体迁移——嵌套虚拟化 CI 验证）
+- [x] M7：默认按需分配——不带几何的创建**默认弹性**：从小规格（256 MiB / 1 vCPU）起步、按压力自动伸缩到可配上限（4 GiB / 4 vCPU），不再"创建即固定"；弹性沙箱从每模板第二个 **elastic golden 快照**（预烘焙 hotplug 区）毫秒级快速创建而非冷启动；运行时 autoscale 开关、resize/autoscale/migrate 时间线事件、节点超售视图与完整的控制台资源管理面（[ADR-0008](docs/adr/0008-default-elastic-geometry.md)；退出标准——弹性 fast-create P50 <500ms、jailed golden 克隆上跨 pause/resume 的 hotplug resize、memmap 税实测探针——嵌套虚拟化 CI 门禁）
 
 到可收费 beta 的现实预期：4-6 个月（后 70% 工作量在网络隔离、调度与可靠性加固）。
 

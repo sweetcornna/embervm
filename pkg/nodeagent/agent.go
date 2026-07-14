@@ -62,6 +62,14 @@ type Config struct {
 	GoldenVCPUs       int
 	GoldenMemoryMiB   int
 	GoldenDataDiskGiB int
+	// GoldenMaxMemoryMiB/GoldenMaxVCPUs additionally build an ELASTIC
+	// golden per template (M7): same base, a virtio-mem hotplug region up
+	// to GoldenMaxMemoryMiB, and GoldenMaxVCPUs boot cores — so
+	// default-elastic creates fast-create instead of cold-booting. Both
+	// zero = fixed golden only (pre-M7 behavior). These must match the
+	// control plane's ElasticDefaults or elastic creates silently miss.
+	GoldenMaxMemoryMiB int
+	GoldenMaxVCPUs     int
 
 	// PauseBalloonSettle enables balloon-assisted pause (chunked mode)
 	// when > 0: inflate the balloon to half the guest's memory, wait this
