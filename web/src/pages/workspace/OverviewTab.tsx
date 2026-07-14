@@ -2,19 +2,21 @@
 // rolling window), the resize panel, identity metadata, storage footprint,
 // and a one-shot exec disclosure for quick non-interactive commands.
 
-import { useMutation } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
-import { decodeBytes, fmtAge, fmtBytes, fmtKiB, fmtMiB, fmtPct } from "../../api/client";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { ApiError, decodeBytes, fmtAge, fmtBytes, fmtKiB, fmtMiB, fmtPct } from "../../api/client";
 import { useSandboxAction, useSandboxEvents, useStorage, verbs } from "../../api/hooks";
 import type { ExecResult } from "../../api/hooks";
 import type { Sandbox, SandboxState } from "../../api/types";
 import { Sparkline } from "../../components/charts";
-import { MemGauge, STATE_META, stateLabel } from "../../components/status";
-import { Button, Card, Empty, ErrorNote, Field, Mono, inputCls } from "../../components/ui";
+import { AutoscaleBadge, CpuGauge, MemGauge, STATE_META, stateLabel } from "../../components/status";
+import { Button, Card, Empty, ErrorNote, Field, Mono, Toggle, inputCls } from "../../components/ui";
+import { slotRoundingHint } from "../../lib/geometry";
 import type { HealthSample } from "../../lib/health";
 import { useSandboxHealth } from "../../lib/health";
 import { useI18n } from "../../lib/i18n";
+import { describeResourceEvent, parseResourceEvent } from "../../lib/resourceEvents";
 import { toast, toastError } from "../../lib/toast";
 
 export function OverviewTab(props: { sb: Sandbox }) {
@@ -25,11 +27,14 @@ export function OverviewTab(props: { sb: Sandbox }) {
       <Gauges sb={sb} />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title={t("Resources", "资源")}>
-          <ResizePanel sb={sb} />
+          <ResourcesPanel sb={sb} />
         </Card>
-        <Card title={t("About", "关于")}>
-          <MetaGrid sb={sb} />
-        </Card>
+        <div className="space-y-4">
+          <Card title={t("About", "关于")}>
+            <MetaGrid sb={sb} />
+          </Card>
+          <ScalingActivity sb={sb} />
+        </div>
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title={t("Storage", "存储")}>
@@ -41,6 +46,69 @@ export function OverviewTab(props: { sb: Sandbox }) {
       </div>
       <RecentEvents sb={sb} />
     </div>
+  );
+}
+
+/* ── Scaling activity (M7): resize / autoscale / migrate history ──────── */
+
+const EVENT_ICONS: Record<string, string> = {
+  grow: "↑",
+  shrink: "↓",
+  migrate: "⇄",
+  config: "⚙",
+  deferred: "⏳",
+};
+
+function ScalingActivity(props: { sb: Sandbox }) {
+  const { data } = useSandboxEvents(props.sb.id);
+  const { t } = useI18n();
+  const nav = useNavigate();
+  const rows = (data?.events ?? [])
+    .map((ev) => ({ ev, d: parseResourceEvent(ev) }))
+    .filter((r) => r.d !== null)
+    .slice(0, 6);
+  return (
+    <Card title={t("Scaling activity", "伸缩记录")} pad={false}>
+      {rows.length === 0 ? (
+        <Empty>{t("No scaling activity recorded.", "暂无伸缩记录。")}</Empty>
+      ) : (
+        <ul className="divide-y divide-hairline/60">
+          {rows.map(({ ev, d }) => {
+            const view = describeResourceEvent(d!, t);
+            return (
+              <li key={ev.id} className="flex items-center gap-3 px-4 py-2">
+                <span
+                  aria-hidden
+                  className="w-4 shrink-0 text-center font-mono text-[13px]"
+                  style={{ color: view.tone === "warn" ? "var(--color-warm)" : "var(--color-ok)" }}
+                >
+                  {EVENT_ICONS[view.icon] ?? "·"}
+                </span>
+                <span className="min-w-0 flex-1 text-[13px] text-ink">
+                  {view.text}
+                  {view.actor && (
+                    <span className="ml-2 rounded-full border border-hairline px-1.5 py-px font-mono text-[10px] text-faint">
+                      {view.actor}
+                    </span>
+                  )}
+                </span>
+                {view.icon === "deferred" && (
+                  <button
+                    className="shrink-0 text-xs text-accent hover:underline"
+                    onClick={() => nav(`/sandboxes/${props.sb.id}/settings`)}
+                  >
+                    {t("migrate →", "迁移 →")}
+                  </button>
+                )}
+                <span className="shrink-0 font-mono text-[11px] text-faint">
+                  {fmtAge(ev.at)} {t("ago", "前")}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
   );
 }
 
@@ -68,6 +136,30 @@ function RecentEvents(props: { sb: Sandbox }) {
       ) : (
         <ul className="divide-y divide-hairline/60">
           {events.map((ev) => {
+            const res = parseResourceEvent(ev);
+            if (res) {
+              const view = describeResourceEvent(res, t);
+              return (
+                <li key={ev.id} className="flex items-center gap-3 px-4 py-2">
+                  <span
+                    aria-hidden
+                    className="w-2 shrink-0 text-center font-mono text-[12px]"
+                    style={{ color: view.tone === "warn" ? "var(--color-warm)" : "var(--color-ok)" }}
+                  >
+                    {EVENT_ICONS[view.icon] ?? "·"}
+                  </span>
+                  <span className="min-w-0 flex-1 text-[13px] text-ink">
+                    {view.text}
+                    {view.actor && (
+                      <span className="ml-2 font-mono text-[11px] text-faint">{view.actor}</span>
+                    )}
+                  </span>
+                  <span className="shrink-0 font-mono text-[11px] text-faint">
+                    {fmtAge(ev.at)} {t("ago", "前")}
+                  </span>
+                </li>
+              );
+            }
             const meta = STATE_META[ev.to_state as SandboxState];
             return (
               <li key={ev.id} className="flex items-center gap-3 px-4 py-2">
@@ -204,17 +296,45 @@ function GaugeCard(props: {
   );
 }
 
-/* ── Resize (ported from the old detail page, optimistic + toast) ────── */
+/* ── Resources (M7): geometry, history, resize, autoscale, capacity UX ── */
 
-function ResizePanel(props: { sb: Sandbox }) {
+function ResourcesPanel(props: { sb: Sandbox }) {
   const { sb } = props;
   const { t } = useI18n();
+  const qc = useQueryClient();
   const base = sb.base_memory_mib || sb.memory_mib;
+  const baseCPU = sb.base_vcpus || 1;
   const maxMem = sb.max_memory_mib ?? 0;
   const maxCPU = sb.max_vcpus ?? 0;
-  const resizable = maxMem > base || maxCPU > (sb.base_vcpus || sb.vcpus);
+  const resizable = maxMem > base || maxCPU > baseCPU;
   const [mem, setMem] = useState(sb.memory_mib);
   const [cpu, setCPU] = useState(sb.vcpus);
+  const [noCapacity, setNoCapacity] = useState(false);
+  // Pre-M7 servers have no POST /autoscale — a 404/405 hides the toggle
+  // and leaves the read-only badge.
+  const [toggleSupported, setToggleSupported] = useState(true);
+  const sliderRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // ⌘K "Resize this sandbox" lands here.
+  useEffect(() => {
+    const onFocus = () => {
+      panelRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      sliderRef.current?.focus();
+    };
+    window.addEventListener("embervm:focus-resize", onFocus);
+    return () => window.removeEventListener("embervm:focus-resize", onFocus);
+  }, []);
+
+  const { samples } = useSandboxHealth(sb.id);
+  const memHistory = useMemo(
+    () =>
+      series(samples, (s) =>
+        s.health.mem_total_kib ? s.health.mem_total_kib / 1024 : undefined,
+      ),
+    [samples],
+  );
+
   const resize = useSandboxAction(
     () =>
       verbs.resize(sb.id, {
@@ -224,35 +344,138 @@ function ResizePanel(props: { sb: Sandbox }) {
     {
       sandboxId: sb.id,
       optimistic: () => ({ memory_mib: mem, vcpus: cpu }),
-      onSuccess: (out) => toast.success(t("Resized", "已调整"), `${fmtMiB(out.memory_mib)} · ${out.vcpus} vCPU`),
-      onError: toastError(t("Resize failed", "调整失败")),
+      onSuccess: (out) => {
+        setNoCapacity(false);
+        toast.success(t("Resized", "已调整"), `${fmtMiB(out.memory_mib)} · ${out.vcpus} vCPU`);
+      },
+      onError: (err) => {
+        // A 409 while inside the ceiling means the NODE is full — surface
+        // the honest options instead of a generic error (ceiling 409s
+        // cannot happen from here; the controls are bounded).
+        if (err instanceof ApiError && err.status === 409 && !err.message.includes("outside resize ceiling")) {
+          setNoCapacity(true);
+          return;
+        }
+        toastError(t("Resize failed", "调整失败"))(err);
+      },
     },
   );
+
+  const setAutoscale = useSandboxAction(
+    (on: boolean) => verbs.setAutoscale(sb.id, on),
+    {
+      sandboxId: sb.id,
+      onSuccess: (out) =>
+        toast.success(
+          out.autoscale
+            ? t("Autoscale on — grows/shrinks between base and ceiling", "自动伸缩已开启 —— 在基础与上限之间自动调整")
+            : t("Autoscale off — geometry only moves when you resize", "自动伸缩已关闭 —— 仅手动调整时改变规格"),
+        ),
+      onError: (err) => {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 405)) {
+          setToggleSupported(false);
+          toast.info(t("This server predates the autoscale toggle", "当前服务端不支持运行时切换自动伸缩"));
+          return;
+        }
+        toastError(t("Autoscale toggle failed", "切换自动伸缩失败"))(err);
+      },
+    },
+  );
+  // Optimistic patch needs the TARGET value, which useSandboxAction's
+  // optimistic() cannot see — patch by hand, roll back by hand. Returns the
+  // toggled sandbox (or undefined on failure) so callers can SEQUENCE a
+  // follow-up mutation instead of racing it against this one's rollback.
+  const flipAutoscale = (on: boolean) => {
+    const prev = qc.getQueryData<Sandbox>(["sandboxes", sb.id]);
+    qc.setQueryData<Sandbox>(["sandboxes", sb.id], (p) => (p ? { ...p, autoscale: on } : p));
+    return setAutoscale.mutateAsync(on).catch(() => {
+      if (prev) qc.setQueryData(["sandboxes", sb.id], prev);
+      return undefined; // onError already surfaced the failure
+    });
+  };
+
+  const migrateRetry = useMutation({
+    mutationFn: async () => {
+      await verbs.migrate(sb.id);
+      return verbs.resize(sb.id, {
+        memory_mib: mem !== sb.memory_mib ? mem : undefined,
+        vcpus: cpu !== sb.vcpus ? cpu : undefined,
+      });
+    },
+    onSuccess: (out) => {
+      setNoCapacity(false);
+      toast.success(t("Migrated & resized", "已迁移并调整"), `${fmtMiB(out.memory_mib)} · ${out.vcpus} vCPU`);
+      void qc.invalidateQueries({ queryKey: ["sandboxes"] });
+      void qc.invalidateQueries({ queryKey: ["nodes"] });
+    },
+    onError: toastError(t("Migrate & retry failed", "迁移重试失败")),
+  });
 
   if (!resizable)
     return (
       <p className="text-[13px] text-faint">
-        {t("Fixed geometry — create with ", "固定规格 —— 创建时指定 ")}
+        {t(
+          "Fixed geometry — this sandbox was created with explicit vcpus/memory_mib. Omit them (elastic is the default) or set ",
+          "固定规格 —— 该沙箱创建时显式指定了 vcpus/memory_mib。省略它们（弹性是默认行为）或设置 ",
+        )}
         <Mono>max_memory_mib</Mono> / <Mono>max_vcpus</Mono>
-        {t(" to enable runtime resize.", " 以启用运行时调整。")}
+        {t(" to get runtime resize.", " 即可获得运行时调整。")}
       </p>
     );
 
   const dirty = mem !== sb.memory_mib || cpu !== sb.vcpus;
+  const roundHint = maxMem > base ? slotRoundingHint(base, mem, t) : null;
   return (
-    <div className="space-y-4">
-      <MemGauge
-        wide
-        state={sb.state}
-        memoryMiB={sb.memory_mib}
-        baseMiB={sb.base_memory_mib}
-        maxMiB={sb.max_memory_mib}
-      />
+    <div ref={panelRef} className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="grid flex-1 gap-3 sm:grid-cols-2">
+          <MemGauge
+            wide
+            state={sb.state}
+            memoryMiB={sb.memory_mib}
+            baseMiB={sb.base_memory_mib}
+            maxMiB={sb.max_memory_mib}
+          />
+          <CpuGauge
+            wide
+            state={sb.state}
+            vcpus={sb.vcpus}
+            baseVCPUs={sb.base_vcpus}
+            maxVCPUs={sb.max_vcpus}
+          />
+        </div>
+        <AutoscaleBadge on={!!sb.autoscale} />
+      </div>
+
+      {sb.state === "RUNNING" && memHistory.length >= 2 && (
+        <div>
+          <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+            {t("Effective memory · ~10 min", "有效内存 · 约 10 分钟")}
+          </div>
+          <Sparkline
+            points={memHistory}
+            label={t("effective memory", "有效内存")}
+            format={(v) => fmtMiB(Math.round(v))}
+            yMin={0}
+            yMax={Math.max(maxMem, sb.memory_mib) * 1.06}
+            refLines={[
+              ...(maxMem > base ? [{ value: maxMem, label: `max ${fmtMiB(maxMem)}` }] : []),
+              { value: base, label: `base ${fmtMiB(base)}` },
+            ]}
+            trendWords={[t("shrinking", "收缩"), t("steady", "平稳"), t("growing", "增长")]}
+          />
+        </div>
+      )}
+
       <div className="grid gap-4 sm:grid-cols-2">
         {maxMem > base && (
-          <Field label={`${t("Memory", "内存")} · ${fmtMiB(base)} – ${fmtMiB(maxMem)}`}>
+          <Field
+            label={`${t("Memory", "内存")} · ${fmtMiB(base)} – ${fmtMiB(maxMem)}`}
+            hint={roundHint ?? undefined}
+          >
             <div className="flex items-center gap-3">
               <input
+                ref={sliderRef}
                 type="range"
                 min={base}
                 max={maxMem}
@@ -266,11 +489,11 @@ function ResizePanel(props: { sb: Sandbox }) {
           </Field>
         )}
         {maxCPU > 0 && (
-          <Field label={`vCPUs · 1 – ${maxCPU}`}>
+          <Field label={`vCPUs · ${baseCPU} – ${maxCPU}`}>
             <input
               className={inputCls}
               type="number"
-              min={1}
+              min={baseCPU}
               max={maxCPU}
               value={cpu}
               onChange={(e) => setCPU(Number(e.target.value))}
@@ -278,6 +501,16 @@ function ResizePanel(props: { sb: Sandbox }) {
           </Field>
         )}
       </div>
+
+      {sb.autoscale && dirty && (
+        <p className="rounded-md border border-hairline bg-bg p-2.5 text-[12px] text-muted">
+          {t(
+            "Autoscale stays in control: it treats your new size as the current point — it may grow it further under pressure, and shrinks it back toward base within ~5 minutes when idle.",
+            "自动伸缩仍在接管：它把你的新规格视为当前值 —— 压力下可能继续扩容，空闲约 5 分钟后会向基础规格回缩。",
+          )}
+        </p>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
         <Button
           kind="primary"
@@ -287,19 +520,53 @@ function ResizePanel(props: { sb: Sandbox }) {
         >
           {t("Apply resize", "应用调整")}
         </Button>
-        {sb.autoscale && (
-          <span className="font-mono text-xs text-transit">
-            {t(
-              "autoscale on — the engine also moves these on guest pressure",
-              "自动伸缩已开启 —— 引擎也会在 guest 压力下自动调整",
-            )}
-          </span>
+        {sb.autoscale && dirty && toggleSupported && (
+          <Button
+            onClick={() =>
+              void flipAutoscale(false).then((out) => {
+                if (out) resize.mutate(); // only after the toggle actually landed
+              })
+            }
+            busy={setAutoscale.isPending}
+            disabled={sb.state !== "RUNNING"}
+          >
+            {t("Turn off autoscale & apply", "关闭自动伸缩并应用")}
+          </Button>
         )}
         {sb.state !== "RUNNING" && (
           <span className="text-xs text-faint">{t("resize needs RUNNING", "调整需要 RUNNING")}</span>
         )}
+        {toggleSupported && !dirty && (
+          <Toggle
+            checked={!!sb.autoscale}
+            onChange={flipAutoscale}
+            label={t("Autoscale on guest pressure", "按 guest 压力自动伸缩")}
+          />
+        )}
       </div>
-      <ErrorNote error={resize.error} />
+
+      {noCapacity && (
+        <div className="space-y-2 rounded-md border border-[color-mix(in_srgb,var(--color-warm)_40%,transparent)] bg-[color-mix(in_srgb,var(--color-warm)_8%,transparent)] p-3">
+          <p className="text-[13px] text-ink">
+            {t(
+              "The node is out of budget for this growth. Your options:",
+              "当前节点预算不足以完成此次扩容。可选项：",
+            )}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button kind="primary" onClick={() => migrateRetry.mutate()} busy={migrateRetry.isPending}>
+              {t("Migrate & retry (scheduler picks)", "迁移并重试（调度器选点）")}
+            </Button>
+            <Link to={`/sandboxes/${sb.id}/settings`} className="text-xs text-accent hover:underline">
+              {t("Choose target node…", "选择目标节点…")}
+            </Link>
+            <span className="text-[11px] text-faint">
+              {t("or pause/resume — resume re-places on a roomier node", "或 暂停/恢复 —— 恢复时会重新放置到更宽裕的节点")}
+            </span>
+          </div>
+        </div>
+      )}
+      {!noCapacity && <ErrorNote error={resize.error} />}
     </div>
   );
 }

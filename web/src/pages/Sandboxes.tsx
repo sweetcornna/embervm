@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { fmtAge } from "../api/client";
-import { useSandboxAction, useSandboxes, verbs } from "../api/hooks";
-import type { Sandbox, SandboxState } from "../api/types";
+import { useFleetEvents, useSandboxAction, useSandboxes, verbs } from "../api/hooks";
+import type { Sandbox, SandboxEvent, SandboxState } from "../api/types";
 import { CreateSandboxDialog } from "../components/createSandbox";
 import { IconChevronDown, IconDots } from "../components/icons";
 import { Menu, MenuItem, MenuSeparator } from "../components/menu";
-import { MemGauge, StateBadge, stateLabel } from "../components/status";
+import { AutoscaleBadge, MemGauge, StateBadge, stateLabel } from "../components/status";
 import {
   Button,
   ConfirmDialog,
@@ -18,10 +18,11 @@ import {
   inputCls,
 } from "../components/ui";
 import { useI18n } from "../lib/i18n";
+import { describeResourceEvent, parseResourceEvent } from "../lib/resourceEvents";
 import { disposeTermSandbox } from "../lib/termBridge";
 import { toast, toastError } from "../lib/toast";
 
-type SortKey = "state" | "memory" | "age";
+type SortKey = "state" | "memory" | "age" | "headroom";
 
 // A stable order for state grouping in the sort.
 const STATE_RANK: SandboxState[] = [
@@ -39,12 +40,20 @@ const STATE_RANK: SandboxState[] = [
   "FAILED",
 ];
 
+/** Headroom = effective / ceiling; fixed rows sort as "full" so operators
+    surface elastic sandboxes near their ceiling first. */
+function headroom(sb: Sandbox): number {
+  const max = sb.max_memory_mib ?? 0;
+  return max > 0 ? sb.memory_mib / max : 1;
+}
+
 export function Sandboxes() {
   const { t } = useI18n();
   const { data, isLoading } = useSandboxes();
+  const fleetEvents = useFleetEvents(100);
   const [creating, setCreating] = useState(false);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<SandboxState | "all">("all");
+  const [filter, setFilter] = useState<SandboxState | "all" | "autoscale">("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "age", dir: -1 });
 
   const all = data ?? [];
@@ -53,11 +62,25 @@ export function Sandboxes() {
     for (const sb of all) m.set(sb.state, (m.get(sb.state) ?? 0) + 1);
     return m;
   }, [all]);
+  const autoscaleCount = useMemo(() => all.filter((sb) => sb.autoscale).length, [all]);
+
+  // Newest resource event per sandbox from the recent fleet feed. Best
+  // effort by design: a busy fleet's older scale actions fall off the 100
+  // events — the column reads "recent scale or —".
+  const lastScale = useMemo(() => {
+    const m = new Map<string, SandboxEvent>();
+    for (const ev of fleetEvents.data?.events ?? []) {
+      if (!m.has(ev.sandbox_id) && parseResourceEvent(ev)) m.set(ev.sandbox_id, ev);
+    }
+    return m;
+  }, [fleetEvents.data]);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     let r = all.filter((sb) => {
-      if (filter !== "all" && sb.state !== filter) return false;
+      if (filter === "autoscale") {
+        if (!sb.autoscale) return false;
+      } else if (filter !== "all" && sb.state !== filter) return false;
       if (!q) return true;
       return (
         sb.id.toLowerCase().includes(q) ||
@@ -69,6 +92,7 @@ export function Sandboxes() {
       let c = 0;
       if (sort.key === "state") c = STATE_RANK.indexOf(a.state) - STATE_RANK.indexOf(b.state);
       else if (sort.key === "memory") c = a.memory_mib - b.memory_mib;
+      else if (sort.key === "headroom") c = headroom(b) - headroom(a); // fullest first
       else c = new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       return c * sort.dir;
     });
@@ -117,6 +141,18 @@ export function Sandboxes() {
               {c === "all" ? `${t("All", "全部")} ${all.length}` : `${stateLabel(c, t)} ${counts.get(c) ?? 0}`}
             </button>
           ))}
+          {autoscaleCount > 0 && (
+            <button
+              onClick={() => setFilter(filter === "autoscale" ? "all" : "autoscale")}
+              className={`rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                filter === "autoscale"
+                  ? "border-accent/50 bg-accent-weak text-accent"
+                  : "border-border text-muted hover:border-accent/40 hover:text-ink"
+              }`}
+            >
+              {t("Autoscale", "自动伸缩")} {autoscaleCount}
+            </button>
+          )}
         </div>
       </div>
 
@@ -125,14 +161,16 @@ export function Sandboxes() {
           <SortHeader key="s" label={t("State", "状态")} active={sort.key === "state"} dir={sort.dir} onClick={() => toggleSort("state")} />,
           t("Sandbox", "沙箱"),
           <SortHeader key="m" label={t("Memory", "内存")} active={sort.key === "memory"} dir={sort.dir} onClick={() => toggleSort("memory")} />,
+          <SortHeader key="h" label={t("Headroom", "余量")} active={sort.key === "headroom"} dir={sort.dir} onClick={() => toggleSort("headroom")} />,
           t("vCPUs", "vCPU"),
           t("Node", "节点"),
+          t("Last scale", "最近伸缩"),
           <SortHeader key="a" label={t("Age", "时长")} active={sort.key === "age"} dir={sort.dir} onClick={() => toggleSort("age")} />,
           "",
         ]}
       >
         {rows.map((sb) => (
-          <Row key={sb.id} sb={sb} />
+          <Row key={sb.id} sb={sb} lastScale={lastScale.get(sb.id)} />
         ))}
       </Table>
       {isLoading && (
@@ -176,9 +214,10 @@ function SortHeader(props: { label: string; active: boolean; dir: 1 | -1; onClic
   );
 }
 
-function Row(props: { sb: Sandbox }) {
+function Row(props: { sb: Sandbox; lastScale?: SandboxEvent }) {
   const { sb } = props;
   const { t } = useI18n();
+  const lastScaleDetail = props.lastScale ? parseResourceEvent(props.lastScale) : null;
   const nav = useNavigate();
   const [confirmKill, setConfirmKill] = useState(false);
   const pause = useSandboxAction(() => verbs.pause(sb.id), {
@@ -215,13 +254,18 @@ function Row(props: { sb: Sandbox }) {
         <Link to={`/sandboxes/${sb.id}`} className="hover:text-accent">
           <Mono>{sb.id.slice(0, 8)}</Mono>
         </Link>
-        <div className="flex gap-2 font-mono text-[11px] text-faint">
-          {sb.autoscale && <span className="text-transit">autoscale</span>}
+        <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-faint">
+          {sb.autoscale && <AutoscaleBadge on />}
           {sb.forked_from && <span>fork:{sb.forked_from}</span>}
         </div>
       </td>
       <td className="px-4 py-2.5">
         <MemGauge state={sb.state} memoryMiB={sb.memory_mib} baseMiB={sb.base_memory_mib} maxMiB={sb.max_memory_mib} />
+      </td>
+      <td className="px-4 py-2.5">
+        <Mono className="text-muted tabular-nums">
+          {(sb.max_memory_mib ?? 0) > 0 ? `${Math.round(headroom(sb) * 100)}%` : "—"}
+        </Mono>
       </td>
       <td className="px-4 py-2.5">
         <Mono className="tabular-nums">
@@ -231,6 +275,19 @@ function Row(props: { sb: Sandbox }) {
       </td>
       <td className="px-4 py-2.5">
         <Mono className="text-muted">{sb.node_id || "—"}</Mono>
+      </td>
+      <td className="px-4 py-2.5">
+        {lastScaleDetail && props.lastScale ? (
+          <span
+            className="font-mono text-[11px] text-muted"
+            title={describeResourceEvent(lastScaleDetail, t).text}
+          >
+            {describeResourceEvent(lastScaleDetail, t).text.slice(0, 28)}
+            <span className="text-faint"> · {fmtAge(props.lastScale.at)}</span>
+          </span>
+        ) : (
+          <span className="text-faint">—</span>
+        )}
       </td>
       <td className="px-4 py-2.5">
         <Mono className="text-muted tabular-nums">{fmtAge(sb.created_at)}</Mono>

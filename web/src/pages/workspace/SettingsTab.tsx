@@ -64,9 +64,11 @@ function PlacementCard(props: { sb: Sandbox }) {
                 <option value="">{t("let the scheduler pick (bin-pack)", "由调度器选择（装箱）")}</option>
                 {candidates.map((n) => (
                   <option key={n.id} value={n.id}>
-                    {n.id} — {fmtMiB(n.used_mib)}
-                    {n.capacity_mib > 0 ? ` / ${fmtMiB(n.capacity_mib)}` : ""} {t("used", "已用")} ·{" "}
-                    {n.active_sandboxes} {t("active", "活跃")}
+                    {n.id} —{" "}
+                    {(n.mem_budget_mib ?? 0) > 0
+                      ? `${fmtMiB(Math.max(0, (n.mem_budget_mib ?? 0) - n.used_mib))} ${t("free of budget", "预算余量")}`
+                      : `${fmtMiB(n.used_mib)}${n.capacity_mib > 0 ? ` / ${fmtMiB(n.capacity_mib)}` : ""} ${t("used", "已用")}`}{" "}
+                    · {n.active_sandboxes} {t("active", "活跃")}
                   </option>
                 ))}
               </select>
@@ -122,8 +124,10 @@ function GeometryCard(props: { sb: Sandbox }) {
   const { t } = useI18n();
   const rows: Array<[string, string]> = [
     [t("memory", "内存"), fmtMiB(sb.memory_mib)],
+    [t("base memory", "基础内存"), sb.base_memory_mib ? fmtMiB(sb.base_memory_mib) : fmtMiB(sb.memory_mib)],
     [t("memory ceiling", "内存上限"), sb.max_memory_mib ? fmtMiB(sb.max_memory_mib) : t("fixed", "固定")],
     [t("vcpus", "vCPU"), String(sb.vcpus)],
+    [t("base vcpus", "基础 vCPU"), String(sb.base_vcpus || sb.vcpus)],
     [t("vcpu ceiling", "vCPU 上限"), sb.max_vcpus ? String(sb.max_vcpus) : t("fixed", "固定")],
     [t("data disk", "数据盘"), `${sb.data_disk_gib} GiB`],
     [t("autoscale", "自动伸缩"), sb.autoscale ? t("on (guest pressure)", "开启（按 guest 压力）") : t("off", "关闭")],

@@ -69,6 +69,30 @@ export interface NodeView {
   used_mib: number;
   used_vcpus: number;
   active_sandboxes: number;
+  // M7 oversell view — absent on pre-M7 servers; every consumer must
+  // degrade to the plain used/capacity bars when these are undefined.
+  base_mib?: number;
+  base_vcpus?: number;
+  ceiling_mib?: number;
+  ceiling_vcpus?: number;
+  mem_budget_mib?: number; // capacity × MemOvercommit; 0/absent = unlimited
+  vcpu_budget?: number; // cores × CPUOvercommit; 0/absent = unconstrained
+}
+
+// sandbox_events.detail payload for M7 resource events (resize / migrate /
+// autoscale_config). Mirrors controlplane.ResourceEventDetail; unknown
+// kinds must render as a generic row.
+export interface ResourceEventDetail {
+  kind: "resize" | "migrate" | "autoscale_config" | string;
+  actor?: "user" | "autoscale" | string;
+  reason?: "manual" | "pressure" | "deferred" | string;
+  memory_mib?: [number, number]; // [old, new]
+  vcpus?: [number, number];
+  from_node?: string;
+  to_node?: string;
+  psi_mem?: number;
+  avail_pct?: number;
+  enabled?: boolean;
 }
 
 export interface Checkpoint {

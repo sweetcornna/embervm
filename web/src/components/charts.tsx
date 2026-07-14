@@ -40,6 +40,9 @@ export function Sparkline(props: {
   yMax?: number;
   color?: string; // series color; default accent
   trendWords?: [string, string, string]; // falling / steady / rising
+  /** Dashed horizontal reference lines (M7: base/ceiling bounds on the
+      effective-memory staircase). Values outside the y-domain are skipped. */
+  refLines?: { value: number; label: string }[];
 }) {
   const { t } = useI18n();
   const color = props.color ?? "var(--color-accent)";
@@ -129,6 +132,33 @@ export function Sparkline(props: {
             vectorEffect="non-scaling-stroke"
           />
         ))}
+        {(props.refLines ?? []).map((r) => {
+          const ry = built.y(r.value);
+          if (ry < PAD_Y - 0.5 || ry > H - PAD_Y + 0.5) return null;
+          return (
+            <g key={`${r.label}-${r.value}`}>
+              <line
+                x1="0"
+                x2={W}
+                y1={ry}
+                y2={ry}
+                stroke="var(--color-faint)"
+                strokeWidth="1"
+                strokeDasharray="4 3"
+                vectorEffect="non-scaling-stroke"
+              />
+              <text
+                x={W - 2}
+                y={ry - 2}
+                textAnchor="end"
+                fill="var(--color-faint)"
+                style={{ font: "9px var(--font-mono, monospace)" }}
+              >
+                {r.label}
+              </text>
+            </g>
+          );
+        })}
         <path d={built.area} fill={color} opacity="0.08" />
         <path
           d={built.line}

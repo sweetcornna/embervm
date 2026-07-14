@@ -186,6 +186,8 @@ export const verbs = {
     api<{ snapshot_id: string }>("POST", `/sandboxes/${id}/snapshot`, { tag }),
   resize: (id: string, body: { memory_mib?: number; vcpus?: number }) =>
     api<Sandbox>("POST", `/sandboxes/${id}/resize`, body),
+  setAutoscale: (id: string, on: boolean) =>
+    api<Sandbox>("POST", `/sandboxes/${id}/autoscale`, { autoscale: on }),
   migrate: (id: string, nodeID?: string) =>
     api<Sandbox>(
       "POST",

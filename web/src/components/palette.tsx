@@ -99,6 +99,20 @@ export function CommandPalette() {
                   <Item onSelect={() => run(() => nav(`/sandboxes/${currentId}/terminal`))}>
                     {t("Open terminal", "打开终端")}
                   </Item>
+                  <Item
+                    onSelect={() =>
+                      run(() => {
+                        nav(`/sandboxes/${currentId}`);
+                        // Let the Overview tab mount before asking it to focus.
+                        setTimeout(() => window.dispatchEvent(new Event("embervm:focus-resize")), 150);
+                      })
+                    }
+                  >
+                    {t("Resize this sandbox", "调整此沙箱规格")}
+                  </Item>
+                  <Item onSelect={() => run(() => nav(`/sandboxes/${currentId}/settings`))}>
+                    {t("Migrate to another node", "迁移到其他节点")}
+                  </Item>
                 </>
               )}
               <Item onSelect={() => run(() => setHelpOpen(true))}>{t("Keyboard shortcuts", "键盘快捷键")}</Item>
