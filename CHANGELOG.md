@@ -8,6 +8,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
 
 ## [Unreleased]
 
+## [v0.7.1] — 2026-07-14 — Bilingual console — **v0.4.1**
+
 ### Added
 
 - **Bilingual console (English / 简体中文)** — the whole console UI is now
@@ -16,9 +18,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions follow
   bilingual `t("English", "中文")` at each call site, persisted in
   `localStorage`, defaulting to the browser language) drives every page,
   workspace tab, dialog, toast, menu, empty/error state, and the lifecycle
-  status labels. Technical values (API field names, IDs, monospace command
+  status labels (`STATE_META` gained a `zh` field + a `stateLabel(state, t)`
+  helper). Technical values (API field names, IDs, monospace command
   examples, state enums on the wire) stay verbatim. No new dependency; the
   offline-bundle guarantee is unchanged.
+
+### Fixed
+
+- **`t`-variable shadowing hazard** — several components use `t` as a local
+  map/loop/destructure variable, which the i18n `t` from `useI18n()` would
+  silently shadow (a runtime bug tsc cannot catch when the types align).
+  Renamed the locals (`tpl` / `item` / `tab` / `row` / `x`) across
+  Templates, createSandbox, toast, tabs, Workspace, and Storage so every
+  `t(en, zh)` call resolves to the translate function.
 
 ## [v0.7.0] — 2026-07-14 — Console workbench — **v0.4**
 
