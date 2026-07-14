@@ -7,16 +7,64 @@ import { Link } from "react-router-dom";
 import { fmtAge, fmtMiB } from "../api/client";
 import { useNodes, useSandboxes } from "../api/hooks";
 import type { NodeView, Sandbox } from "../api/types";
-import { StateBadge } from "../components/status";
+import { AutoscaleBadge, MemGauge, StateBadge } from "../components/status";
 import {
   CapacityBar,
   Drawer,
   Empty,
   Mono,
+  OversellBar,
   PageHeader,
   Skeleton,
 } from "../components/ui";
 import { useI18n } from "../lib/i18n";
+import type { TFn } from "../lib/i18n";
+
+/** Memory bars: the M7 oversell view when the server reports base/ceiling
+    sums, else the plain used/capacity bar (pre-M7 server). */
+function NodeMemoryBar(props: { n: NodeView; t: TFn }) {
+  const { n, t } = props;
+  if (n.ceiling_mib === undefined || n.base_mib === undefined) {
+    return <CapacityBar label={t("memory", "内存")} used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />;
+  }
+  return (
+    <OversellBar
+      label={t("memory", "内存")}
+      base={n.base_mib}
+      used={n.used_mib}
+      ceiling={n.ceiling_mib}
+      capacity={n.capacity_mib}
+      budget={n.mem_budget_mib ?? 0}
+      fmt={fmtMiB}
+      overBudgetTitle={t(
+        `If every sandbox grew to its ceiling this node would need ${fmtMiB(n.ceiling_mib)} — grows will defer.`,
+        `若所有沙箱都涨到上限，此节点需 ${fmtMiB(n.ceiling_mib)} —— 届时扩容将被推迟。`,
+      )}
+    />
+  );
+}
+
+function NodeCPUBar(props: { n: NodeView; t: TFn }) {
+  const { n, t } = props;
+  if (n.ceiling_vcpus === undefined || n.base_vcpus === undefined) {
+    return <CapacityBar label={t("vcpus", "vCPU")} used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />;
+  }
+  return (
+    <OversellBar
+      label={t("vcpus", "vCPU")}
+      base={n.base_vcpus}
+      used={n.used_vcpus}
+      ceiling={n.ceiling_vcpus}
+      capacity={n.cpu_cores ?? 0}
+      budget={n.vcpu_budget ?? 0}
+      fmt={(v) => String(v)}
+      overBudgetTitle={t(
+        `If every sandbox grew to its vCPU ceiling this node would owe ${n.ceiling_vcpus} vCPUs — grows will defer.`,
+        `若所有沙箱都涨到 vCPU 上限，此节点需 ${n.ceiling_vcpus} vCPU —— 届时扩容将被推迟。`,
+      )}
+    />
+  );
+}
 
 export function Nodes() {
   const { t } = useI18n();
@@ -78,8 +126,8 @@ function NodeCard(props: { node: NodeView; onOpen: () => void }) {
         </span>
       </div>
       <div className="space-y-2.5">
-        <CapacityBar label={t("memory", "内存")} used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />
-        <CapacityBar label={t("vcpus", "vCPU")} used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />
+        <NodeMemoryBar n={n} t={t} />
+        <NodeCPUBar n={n} t={t} />
         <div className="font-mono text-[11px] text-muted tabular-nums">
           <span className="text-ink">{n.active_sandboxes}</span> {t("active", "活跃")}
         </div>
@@ -111,8 +159,8 @@ function NodeDetail(props: { node: NodeView; sandboxes: Sandbox[] }) {
         ))}
       </dl>
       <div className="space-y-2.5">
-        <CapacityBar label={t("memory", "内存")} used={n.used_mib} total={n.capacity_mib} fmt={fmtMiB} />
-        <CapacityBar label={t("vcpus", "vCPU")} used={n.used_vcpus} total={n.cpu_cores ?? 0} fmt={(v) => String(v)} />
+        <NodeMemoryBar n={n} t={t} />
+        <NodeCPUBar n={n} t={t} />
       </div>
       <div>
         <h3 className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
@@ -128,7 +176,8 @@ function NodeDetail(props: { node: NodeView; sandboxes: Sandbox[] }) {
                   <Mono className="text-[12px]">{sb.id.slice(0, 8)}</Mono>
                 </Link>
                 <div className="flex items-center gap-3">
-                  <Mono className="text-[11px] text-muted tabular-nums">{fmtMiB(sb.memory_mib)}</Mono>
+                  {sb.autoscale && <AutoscaleBadge on />}
+                  <MemGauge state={sb.state} memoryMiB={sb.memory_mib} baseMiB={sb.base_memory_mib} maxMiB={sb.max_memory_mib} />
                   <StateBadge state={sb.state} />
                 </div>
               </li>

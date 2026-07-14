@@ -120,3 +120,80 @@ export function MemGauge(props: {
     </div>
   );
 }
+
+/** Effective vCPUs inside the [base, max] track — MemGauge's CPU sibling
+    (M7). Fixed geometry renders the plain value. */
+export function CpuGauge(props: {
+  state: SandboxState;
+  vcpus: number;
+  baseVCPUs?: number;
+  maxVCPUs?: number;
+  wide?: boolean;
+}) {
+  const max = props.maxVCPUs && props.maxVCPUs > 0 ? props.maxVCPUs : props.vcpus;
+  const base = props.baseVCPUs && props.baseVCPUs > 0 ? props.baseVCPUs : props.vcpus;
+  const resizable = max > base;
+  const pct = Math.max(3, Math.min(100, (props.vcpus / max) * 100));
+  const basePct = Math.max(0, Math.min(100, (base / max) * 100));
+  const c = meta(props.state).color;
+  return (
+    <div className={props.wide ? "w-full" : "w-40"}>
+      <div
+        className="relative h-1.5 overflow-hidden rounded-full bg-overlay"
+        role="meter"
+        aria-label="effective vcpus"
+        aria-valuenow={props.vcpus}
+        aria-valuemin={base}
+        aria-valuemax={max}
+      >
+        <div
+          className="h-full rounded-full transition-[width] duration-500"
+          style={{ width: `${pct}%`, background: c }}
+        />
+        {resizable && (
+          <div
+            aria-hidden
+            className="absolute top-[-1px] h-[calc(100%+2px)] w-px bg-ink/50"
+            style={{ left: `${basePct}%` }}
+            title={`base ${base} vCPU`}
+          />
+        )}
+      </div>
+      <div className="mt-1 flex justify-between font-mono text-[11px] text-muted tabular-nums">
+        <span className="text-ink">{props.vcpus} vCPU</span>
+        {resizable ? <span>/ {max}</span> : <span className="text-faint">fixed</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Autoscale state pill (M7): on (engine in control), off-but-resizable
+    (manual), or deferred (engine wants to grow, node is full). Fixed
+    geometry should not render this at all. */
+export function AutoscaleBadge(props: { on: boolean; deferred?: boolean }) {
+  const { t } = useI18n();
+  const c = props.deferred
+    ? "var(--color-warm)"
+    : props.on
+      ? "var(--color-transit)"
+      : "var(--color-idle)";
+  const label = props.deferred
+    ? t("autoscale · deferred", "自动伸缩 · 已推迟")
+    : props.on
+      ? t("autoscale", "自动伸缩")
+      : t("manual", "手动");
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium"
+      style={{ color: c, borderColor: color(c, "35%"), background: color(c, "12%") }}
+      title={
+        props.on
+          ? "pressure-driven resize between base and ceiling"
+          : "resize via the workspace panel"
+      }
+    >
+      <span aria-hidden className="inline-block h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: c }} />
+      {label}
+    </span>
+  );
+}

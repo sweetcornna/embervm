@@ -25,6 +25,7 @@ import {
   inputCls,
 } from "../../components/ui";
 import { useI18n } from "../../lib/i18n";
+import { describeResourceEvent, parseResourceEvent } from "../../lib/resourceEvents";
 import { toast } from "../../lib/toast";
 
 export function CheckpointsTab(props: { sb: Sandbox }) {
@@ -303,6 +304,29 @@ function CheckpointRow(props: {
 function EventRow(props: { ev: SandboxEvent }) {
   const { ev } = props;
   const { t } = useI18n();
+  const res = parseResourceEvent(ev);
+  if (res) {
+    const view = describeResourceEvent(res, t);
+    const color = view.tone === "warn" ? "var(--color-warm)" : "var(--color-transit)";
+    return (
+      <>
+        <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: color }} />
+        <div className="min-w-0 flex-1">
+          <span className="text-[13px] text-ink">{view.text}</span>
+          {view.actor && (
+            <span className="ml-2 rounded-full border border-hairline px-1.5 py-px font-mono text-[10px] text-faint">
+              {view.actor}
+            </span>
+          )}
+        </div>
+        <Tip mono content={new Date(ev.at).toLocaleString()}>
+          <span className="shrink-0 cursor-default font-mono text-[11px] text-faint">
+            {fmtAge(ev.at)} {t("ago", "前")}
+          </span>
+        </Tip>
+      </>
+    );
+  }
   const meta = STATE_META[ev.to_state as SandboxState];
   const color = meta?.color ?? "var(--color-idle)";
   const errDetail = ev.detail && typeof ev.detail.error === "string" ? ev.detail.error : null;

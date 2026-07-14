@@ -342,6 +342,86 @@ export function CapacityBar(props: {
   );
 }
 
+/* ── Oversell bar (nodes, M7) ────────────────────────────────────────── */
+/** One track, layered: committed BASE (solid), EFFECTIVE used (mid), the
+    CEILING sum (hatched — what the node owes if every sandbox grew to its
+    max), with tick markers at capacity and the oversold budget. Labels come
+    translated from the caller (this file stays i18n-free). */
+export function OversellBar(props: {
+  label: string;
+  base: number;
+  used: number;
+  ceiling: number;
+  capacity: number; // 0 = unlimited
+  budget: number; // capacity × overcommit; 0 = unlimited
+  fmt: (n: number) => string;
+  overBudgetTitle?: string; // tooltip when ceiling > budget
+}) {
+  const domain = Math.max(props.ceiling, props.used, props.budget, props.capacity, 1);
+  const pct = (v: number) => Math.min(100, (v / domain) * 100);
+  const overBudget = props.budget > 0 && props.ceiling > props.budget;
+  const hatch = overBudget
+    ? "repeating-linear-gradient(135deg, color-mix(in srgb, var(--color-danger) 45%, transparent) 0 3px, transparent 3px 6px)"
+    : "repeating-linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 35%, transparent) 0 3px, transparent 3px 6px)";
+  return (
+    <div title={overBudget ? props.overBudgetTitle : undefined}>
+      <div className="flex justify-between font-mono text-[11px] text-muted tabular-nums">
+        <span>{props.label}</span>
+        <span>
+          <span className="text-ink">{props.fmt(props.used)}</span>
+          <span className="text-faint"> / {props.fmt(props.ceiling)} max</span>
+        </span>
+      </div>
+      <div className="relative mt-1 h-2 overflow-hidden rounded-full bg-overlay">
+        {/* ceiling sum — hatched, the oversell exposure */}
+        <div
+          className="absolute inset-y-0 left-0 rounded-full"
+          style={{ width: `${pct(props.ceiling)}%`, background: hatch }}
+        />
+        {/* effective used */}
+        <div
+          className="absolute inset-y-0 left-0 rounded-full"
+          style={{
+            width: `${Math.max(props.used > 0 ? 2 : 0, pct(props.used))}%`,
+            background: "color-mix(in srgb, var(--color-accent) 55%, transparent)",
+          }}
+        />
+        {/* committed base */}
+        <div
+          className="absolute inset-y-0 left-0 rounded-full"
+          style={{
+            width: `${Math.max(props.base > 0 ? 2 : 0, pct(props.base))}%`,
+            background: "var(--color-accent)",
+          }}
+        />
+        {/* capacity + budget ticks */}
+        {props.capacity > 0 && (
+          <div
+            aria-hidden
+            className="absolute inset-y-0 w-px bg-ink/60"
+            style={{ left: `${pct(props.capacity)}%` }}
+          />
+        )}
+        {props.budget > 0 && props.budget !== props.capacity && (
+          <div
+            aria-hidden
+            className="absolute inset-y-0 w-px"
+            style={{ left: `${pct(props.budget)}%`, background: "var(--color-warm)" }}
+          />
+        )}
+      </div>
+      <div className="mt-0.5 flex justify-between font-mono text-[10px] text-faint tabular-nums">
+        <span>base {props.fmt(props.base)}</span>
+        {props.budget > 0 ? (
+          <span className={overBudget ? "text-danger" : ""}>budget {props.fmt(props.budget)}</span>
+        ) : (
+          <span>unlimited</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ── Skeleton / KBD / IconButton ─────────────────────────────────────── */
 export function Skeleton(props: { className?: string }) {
   return (
