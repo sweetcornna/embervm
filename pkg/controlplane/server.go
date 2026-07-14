@@ -1366,17 +1366,31 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 		return
 	}
 
+	// The seeded sandbox cold-boots (nothing rides a snapshot here), so it
+	// starts at the ORIGINAL base floor and keeps the ceilings + autoscale
+	// (M7): dropping them would silently turn every default-elastic sandbox
+	// fixed on its way back from RECYCLED. Pre-M6 rows have zero bases —
+	// fall back to the effective values.
+	baseMem, baseCPU := sb.BaseMemoryMiB, sb.BaseVCPUs
+	if baseMem == 0 {
+		baseMem = sb.MemoryMiB
+	}
+	if baseCPU == 0 {
+		baseCPU = sb.VCPUs
+	}
 	newID := uuid.NewString()
 	row, err := s.store.CreateSandbox(c, Sandbox{
 		ID: newID, TemplateID: sb.TemplateID, State: string(lifecycle.StatePending),
-		VCPUs: sb.VCPUs, MemoryMiB: sb.MemoryMiB, DataDiskGiB: sb.DataDiskGiB,
+		VCPUs: baseCPU, MemoryMiB: baseMem, DataDiskGiB: sb.DataDiskGiB,
+		MaxMemoryMiB: sb.MaxMemoryMiB, MaxVCPUs: sb.MaxVCPUs,
+		BaseMemoryMiB: baseMem, BaseVCPUs: baseCPU, Autoscale: sb.Autoscale,
 		Owner: sb.Owner, ArtifactPaths: sb.ArtifactPaths,
 	})
 	if err != nil {
 		abortErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	nodeID, err := s.sched.Place(c, sb.NodeID, sb.MemoryMiB, sb.VCPUs)
+	nodeID, err := s.sched.Place(c, sb.NodeID, baseMem, baseCPU)
 	if err != nil {
 		_ = s.store.SetSandboxState(c, newID, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())
 		abortErr(c, http.StatusServiceUnavailable, err)
@@ -1395,7 +1409,8 @@ func (s *Server) restoreArtifacts(c *gin.Context) {
 	}
 	st, err := agent.CreateSandbox(c, nodeapi.CreateSandboxRequest{
 		SandboxID: newID, TemplateID: sb.TemplateID,
-		VCPUs: sb.VCPUs, MemoryMiB: sb.MemoryMiB, DataDiskGiB: sb.DataDiskGiB,
+		VCPUs: baseCPU, MemoryMiB: baseMem, DataDiskGiB: sb.DataDiskGiB,
+		MaxMemoryMiB: sb.MaxMemoryMiB, MaxVCPUs: sb.MaxVCPUs,
 	})
 	if err != nil {
 		_ = s.store.SetSandboxState(c, newID, string(lifecycle.StatePending), string(lifecycle.StateFailed), "", err.Error())

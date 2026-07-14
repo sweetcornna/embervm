@@ -1,11 +1,18 @@
 package controlplane
 
 import (
+	"archive/tar"
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
+
+	"github.com/embervm/embervm/pkg/chunkstore"
+	"github.com/embervm/embervm/pkg/nodeagent"
 )
 
 // mkTemplate creates a READY template and returns its id.
@@ -271,6 +278,76 @@ func TestServerListNodesOversell(t *testing.T) {
 	}
 	if n.CeilingVCPUs != 4+1 {
 		t.Errorf("ceiling_vcpus = %d, want 5", n.CeilingVCPUs)
+	}
+}
+
+// TestServerRestoreArtifactsKeepsElastic pins the M7 audit fix: a RECYCLED
+// default-elastic sandbox restored via restore-artifacts keeps its ceilings
+// and autoscale, and cold-boots at the BASE floor (not the last effective
+// geometry) — dropping either would silently turn it fixed.
+func TestServerRestoreArtifactsKeepsElastic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := testStore(t)
+	tokens := NewTokenStore(map[string]TokenInfo{"tok": {Owner: "alice", MaxSandboxes: 5}})
+	cold, err := chunkstore.NewDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock := &cpMockAgent{}
+	h := NewServer(store, mock, tokens, nil, cold).Handler()
+	tpl := mkTemplate(t, h)
+
+	w := call(h, http.MethodPost, "/v0/sandboxes",
+		map[string]any{"template_id": tpl, "artifact_paths": []string{"/data"}})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	var sb Sandbox
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+	// Grow so the effective geometry sits above the base floor.
+	if w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/resize", map[string]any{"memory_mib": 512}); w.Code != http.StatusOK {
+		t.Fatalf("resize = %d: %s", w.Code, w.Body)
+	}
+	ctx := context.Background()
+	if err := store.SetSandboxState(ctx, sb.ID, "RUNNING", "RECYCLED", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// A minimal artifacts tarball in the cold store.
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	if err := tw.WriteHeader(&tar.Header{Name: "data/x", Mode: 0o644, Size: 2}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = tw.Write([]byte("ok"))
+	_ = tw.Close()
+	var zBuf bytes.Buffer
+	zw, _ := zstd.NewWriter(&zBuf)
+	_, _ = zw.Write(tarBuf.Bytes())
+	_ = zw.Close()
+	if err := cold.PutObject(ctx, nodeagent.KeyArtifacts(sb.ID), bytes.NewReader(zBuf.Bytes()), int64(zBuf.Len())); err != nil {
+		t.Fatal(err)
+	}
+
+	w = call(h, http.MethodPost, "/v0/sandboxes/"+sb.ID+"/restore-artifacts", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("restore-artifacts = %d: %s", w.Code, w.Body)
+	}
+	var out struct {
+		Sandbox Sandbox `json:"sandbox"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	got := out.Sandbox
+	if got.MaxMemoryMiB != 4096 || got.MaxVCPUs != 4 || !got.Autoscale {
+		t.Errorf("restored sandbox lost elasticity: max %d/%dMiB autoscale %v",
+			got.MaxVCPUs, got.MaxMemoryMiB, got.Autoscale)
+	}
+	if got.MemoryMiB != 256 || got.BaseMemoryMiB != 256 {
+		t.Errorf("restored boot geometry = %dMiB (base %d), want the 256 base floor", got.MemoryMiB, got.BaseMemoryMiB)
+	}
+	if mock.lastCreate.MaxMemoryMiB != 4096 || mock.lastCreate.MaxVCPUs != 4 ||
+		mock.lastCreate.MemoryMiB != 256 {
+		t.Errorf("node request lost the elastic geometry: %+v", mock.lastCreate)
 	}
 }
 

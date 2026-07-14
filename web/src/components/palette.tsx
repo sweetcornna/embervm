@@ -61,6 +61,23 @@ export function CommandPalette() {
     onSuccess: () => toast.success(t("Snapshot taken", "已快照")),
     onError: toastError(t("Snapshot failed", "快照失败")),
   });
+  // The current workspace sandbox — the autoscale toggle needs its state
+  // and only makes sense on an elastic (ceiling-bearing) sandbox (M7).
+  const current = (sandboxes.data ?? []).find((sb) => sb.id === currentId);
+  const currentElastic = (current?.max_memory_mib ?? 0) > 0 || (current?.max_vcpus ?? 0) > 0;
+  const autoscale = useSandboxAction(
+    () => verbs.setAutoscale(currentId!, !current?.autoscale),
+    {
+      sandboxId: currentId,
+      onSuccess: (out) =>
+        toast.success(
+          out.autoscale
+            ? t("Autoscale on", "自动伸缩已开启")
+            : t("Autoscale off", "自动伸缩已关闭"),
+        ),
+      onError: toastError(t("Autoscale toggle failed", "切换自动伸缩失败")),
+    },
+  );
 
   return (
     <>
@@ -110,6 +127,13 @@ export function CommandPalette() {
                   >
                     {t("Resize this sandbox", "调整此沙箱规格")}
                   </Item>
+                  {currentElastic && (
+                    <Item onSelect={() => run(() => autoscale.mutate())}>
+                      {current?.autoscale
+                        ? t("Turn off autoscale", "关闭自动伸缩")
+                        : t("Turn on autoscale", "开启自动伸缩")}
+                    </Item>
+                  )}
                   <Item onSelect={() => run(() => nav(`/sandboxes/${currentId}/settings`))}>
                     {t("Migrate to another node", "迁移到其他节点")}
                   </Item>
